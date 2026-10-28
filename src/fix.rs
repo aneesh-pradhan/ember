@@ -77,21 +77,34 @@ impl Ctx {
     }
 
     /// Force a single structured tool call and return its arguments.
+    /// Get one structured answer by forcing a tool call. If the endpoint rejects a forced tool_choice,
+    /// or the model answers in prose, fall back to asking for the arguments as plain JSON.
     async fn structured(&self, tier: Tier, messages: Vec<Message>, spec: ToolSpec) -> Result<Value> {
         let name = spec.function.name.clone();
-        let resp = self
-            .chat(tier, Request {
-                messages,
-                tools: vec![spec],
-                tool_choice: Some(json!({"type": "function", "function": {"name": name}})),
-                max_tokens: Some(8192),
-                ..Default::default()
-            })
-            .await?;
-        if let Some(call) = resp.tool_calls.into_iter().find(|c| c.function.name == name) {
-            return serde_json::from_str(&call.function.arguments).with_context(|| format!("{name}: arguments were not valid JSON"));
+        let forced = Request {
+            messages: messages.clone(),
+            tools: vec![spec.clone()],
+            tool_choice: Some(json!({"type": "function", "function": {"name": name}})),
+            max_tokens: Some(8192),
+            ..Default::default()
+        };
+        if let Ok(resp) = self.chat(tier, forced).await {
+            if let Some(call) = resp.tool_calls.into_iter().find(|c| c.function.name == name) {
+                if let Ok(v) = serde_json::from_str(&call.function.arguments) {
+                    return Ok(v);
+                }
+            }
+            if let Some(v) = extract_json(&resp.content) {
+                return Ok(v);
+            }
         }
-        extract_json(&resp.content).ok_or_else(|| anyhow!("the model did not call {name}"))
+        let mut messages = messages;
+        messages.push(Message::user(format!(
+            "Reply with only a JSON object (no prose, no code fence) matching this schema for `{name}`:\n{}",
+            spec.function.parameters
+        )));
+        let resp = self.chat(tier, Request { messages, max_tokens: Some(8192), ..Default::default() }).await?;
+        extract_json(&resp.content).with_context(|| format!("the model did not return {name} as JSON"))
     }
 }
 
