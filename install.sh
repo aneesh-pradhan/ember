@@ -70,8 +70,12 @@ case ":$PATH:" in
     *":$INSTALL_DIR:"*) ;;
     *)
         say ""
-        say "$INSTALL_DIR is not on your PATH. Add it with:"
-        say "  echo 'export PATH=\"$INSTALL_DIR:\$PATH\"' >> ~/.bashrc   # or ~/.zshrc"
+        say "$INSTALL_DIR is not on your PATH yet. Add it with:"
+        case "${SHELL:-}" in
+            */zsh) say "  echo 'export PATH=\"$INSTALL_DIR:\$PATH\"' >> ~/.zshrc && source ~/.zshrc" ;;
+            */fish) say "  fish_add_path $INSTALL_DIR" ;;
+            *) say "  echo 'export PATH=\"$INSTALL_DIR:\$PATH\"' >> ~/.bashrc && source ~/.bashrc" ;;
+        esac
         ;;
 esac
 

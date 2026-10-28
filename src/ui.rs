@@ -196,6 +196,7 @@ impl App {
             terminal.insert_before(part.len() as u16, |buf| {
                 let area = buf.area;
                 Paragraph::new(part).render(area, buf);
+                theme::adapt(buf);
             })?;
         }
         Ok(())
@@ -951,6 +952,7 @@ impl App {
         }
 
         Paragraph::new(self.status_line()).render(status, f.buffer_mut());
+        theme::adapt(f.buffer_mut());
     }
 
     fn popup_lines(&self, popup: &Popup, height: usize, width: u16) -> Vec<Line<'static>> {

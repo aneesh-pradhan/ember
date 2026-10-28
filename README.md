@@ -46,28 +46,77 @@ Nemotron's reasoning is streamed live in the UI (from `reasoning_content` or inl
 
 ## Install
 
-On Linux (x86_64 or ARM64, any distribution) or macOS (Apple Silicon or Intel):
+ember runs on **macOS** (Apple Silicon and Intel) and **Linux** (x86_64 and ARM64, any distribution).
+You need `git`, plus a [Nebius Token Factory API key](https://tokenfactory.nebius.com/project/api-keys).
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/aneesh-pradhan/ember/main/install.sh | sh
-```
+### macOS
 
-The script downloads the matching binary from [Releases](https://github.com/aneesh-pradhan/ember/releases),
-verifies its SHA-256 checksum, and installs it to `~/.local/bin`. Set `EMBER_INSTALL_DIR` to choose another
-directory, or `EMBER_VERSION=v0.1.1` to pin a version. To uninstall, delete `~/.local/bin/ember`.
+1. Install ember. Open Terminal (or iTerm2, Ghostty, WezTerm…) and run:
 
-Or build from source (Rust 1.80+):
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/aneesh-pradhan/ember/main/install.sh | sh
+   ```
 
-```bash
-cargo install --git https://github.com/aneesh-pradhan/ember
-```
+2. Put `~/.local/bin` on your PATH. macOS uses zsh by default; the installer prints the exact line if needed:
 
-Then put your Token Factory key in `~/.config/ember/env` (or a `.env` in the project you run it from):
+   ```bash
+   echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
+   ```
 
-```bash
-mkdir -p ~/.config/ember
-printf 'NEBIUS_API_KEY=%s\n' 'your-key' > ~/.config/ember/env && chmod 600 ~/.config/ember/env
-```
+3. Add your API key:
+
+   ```bash
+   mkdir -p ~/.config/ember
+   printf 'NEBIUS_API_KEY=%s\n' 'your-key' > ~/.config/ember/env && chmod 600 ~/.config/ember/env
+   ```
+
+4. `git` comes with the Xcode Command Line Tools. If `git --version` asks you to install them, accept, or run
+   `xcode-select --install`.
+
+Notes for macOS:
+- Terminal.app may not show 24-bit color, so ember switches to a 256-color palette there automatically. For the
+  best colors, use iTerm2, Ghostty, WezTerm, Kitty or the VS Code terminal. Set `EMBER_COLORS=256` or
+  `EMBER_COLORS=truecolor` to override.
+- If you download a release archive **in a browser** instead of using the installer, macOS quarantines the
+  binary. Clear the flag with `xattr -d com.apple.quarantine ./ember`.
+- To build from source instead: install the Xcode Command Line Tools and Rust
+  (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`, or `brew install rust`), then
+  `cargo install --git https://github.com/aneesh-pradhan/ember`.
+
+### Linux
+
+1. Install ember:
+
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/aneesh-pradhan/ember/main/install.sh | sh
+   ```
+
+   The Linux builds are fully static (musl), so they work on any distribution.
+
+2. If `~/.local/bin` isn't on your PATH (the installer tells you), add it:
+
+   ```bash
+   echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
+   ```
+
+3. Add your API key:
+
+   ```bash
+   mkdir -p ~/.config/ember
+   printf 'NEBIUS_API_KEY=%s\n' 'your-key' > ~/.config/ember/env && chmod 600 ~/.config/ember/env
+   ```
+
+To build from source on Linux: install Rust 1.80+ (via [rustup](https://rustup.rs) or your package manager)
+and run `cargo install --git https://github.com/aneesh-pradhan/ember`.
+
+### Installer options, updating and uninstalling
+
+- The installer downloads the matching binary from [Releases](https://github.com/aneesh-pradhan/ember/releases),
+  verifies its SHA-256 checksum, and installs it to `~/.local/bin`.
+- `EMBER_INSTALL_DIR=/some/dir` installs elsewhere; `EMBER_VERSION=v0.2.1` pins a version.
+- **Update:** run the same one-liner again. **Uninstall:** `rm ~/.local/bin/ember`.
+- The key can also live in a `.env` file in the project you run ember from. Saved conversations are stored in
+  `~/.local/share/ember` on Linux and `~/Library/Application Support/ember` on macOS.
 
 ## Use
 
@@ -126,10 +175,12 @@ ember reads project instructions from `AGENTS.md` or `EMBER.md` in the working d
 
 ## Try `/fix` on the demo project
 
-`examples/tinyledger` is a small invoicing library with a real rounding bug (see its `ISSUE.md`):
+`examples/tinyledger` is a small invoicing library with a real rounding bug (see its `ISSUE.md`). Its tests run
+with [uv](https://docs.astral.sh/uv/): `brew install uv` on macOS, or
+`curl -LsSf https://astral.sh/uv/install.sh | sh` on either OS.
 
 ```bash
-cd examples/tinyledger
+git clone https://github.com/aneesh-pradhan/ember && cd ember/examples/tinyledger
 EMBER_TEST_CMD="uvx pytest -q" ember
 /fix Invoice totals are a cent short: 2.50 with 5% tax gives tax 0.12, should be 0.13
 ```

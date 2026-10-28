@@ -7,10 +7,28 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked
       - run: cargo test --locked
+
+  # Runs the published installer the way users do, then starts the installed binary.
+  installer:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - run: sh install.sh
+        env:
+          EMBER_INSTALL_DIR: ${{ runner.temp }}/bin
+      - run: |
+          "$RUNNER_TEMP/bin/ember" --version
+          "$RUNNER_TEMP/bin/ember" --help

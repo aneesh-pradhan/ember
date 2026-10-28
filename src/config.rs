@@ -50,7 +50,10 @@ impl Config {
     pub fn load() -> Config {
         // Project .env first, then the user-level file; real env vars win over both.
         let _ = dotenvy::dotenv();
-        if let Some(path) = user_env_file() {
+        // ~/.config/ember/env on every platform; also the platform config dir
+        // (~/Library/Application Support/ember/env on macOS) for anyone who put it there.
+        let platform = dirs::config_dir().map(|d| d.join("ember").join("env"));
+        for path in [user_env_file(), platform].into_iter().flatten() {
             let _ = dotenvy::from_path(path);
         }
         let var = |name: &str, default: &str| env::var(name).ok().filter(|v| !v.is_empty()).unwrap_or_else(|| default.to_string());
@@ -86,6 +89,11 @@ pub fn context_window(model: &str) -> u64 {
     }
 }
 
+/// `$XDG_CONFIG_HOME/ember/env`, defaulting to `~/.config/ember/env` (on macOS too).
 pub fn user_env_file() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("ember").join("env"))
+    let base = env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| dirs::home_dir().map(|h| h.join(".config")))?;
+    Some(base.join("ember").join("env"))
 }
