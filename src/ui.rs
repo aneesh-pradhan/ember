@@ -736,7 +736,10 @@ fn notice(text: impl Into<String>) -> Line<'static> {
 }
 
 fn diff_lines(diff: &str, max: usize) -> Vec<Line<'static>> {
-    let lines: Vec<&str> = diff.lines().filter(|l| !l.starts_with("---") && !l.starts_with("+++")).collect();
+    let lines: Vec<&str> = diff
+        .lines()
+        .filter(|l| !["---", "+++", "index ", "new file mode", "deleted file mode"].iter().any(|p| l.starts_with(p)))
+        .collect();
     let mut out: Vec<Line<'static>> =
         lines.iter().take(max).map(|line| Line::styled(format!("    {line}"), theme::diff_line(line))).collect();
     if lines.len() > max {

@@ -48,7 +48,7 @@ pub fn tier(t: Tier) -> Style {
 }
 
 pub fn diff_line(line: &str) -> Style {
-    if line.starts_with("+++") || line.starts_with("---") {
+    if line.starts_with("+++") || line.starts_with("---") || line.starts_with("diff --git") {
         bold()
     } else if line.starts_with('+') {
         ok()

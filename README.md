@@ -1,126 +1,123 @@
-# FailFirst
+# ember
 
-**An agent that proves a bug with a failing test before it fixes it.**
+**A terminal coding agent powered by NVIDIA Nemotron on Nebius Token Factory, written in Rust.**
 
-Most AI coding agents go straight from an issue to a patch, and you're left wondering whether it fixes
-anything. FailFirst works the way a careful maintainer does:
+ember lives in your terminal. Ask it to explain code, build a feature, or fix a failing build. It reads
+and searches your project, edits files, and runs commands. Before any edit or command, it shows you
+the diff or the command line and asks for approval. The conversation stays in your terminal's normal
+scrollback, so you can scroll, search, and copy it like any other output.
 
-1. **Reproduce first.** It reads the issue and the code, then writes a pytest test that **fails on the current
-   code, for the reason the issue describes**. A Nemotron judge rejects tests that fail for the wrong reason
-   (an import error, a typo, asserting the wrong thing). If it can't reproduce the bug, it stops and says so. It
-   never hands you an unverified patch.
-2. **Checkpoint.** The sandbox state with the failing test is saved as an immutable image.
-3. **Branch.** Nemotron Ultra plans several genuinely different fix strategies. Each one is patched and tested
-   in its own sandbox, in parallel, from the same checkpoint.
-4. **Verify.** A branch only wins if the reproduction test now passes **and** no existing test that passed before
-   now fails. The agent is not allowed to edit test files, so it can't "fix" the bug by weakening the test.
-5. **Review.** Ultra compares the passing candidates, picks one, and writes the pull request description.
-
-You get a diff containing the fix *plus* the regression test, with evidence that the test failed before and passes after.
-
-Track: **Coding and Agentic Engineering**.
-
-## How it uses NVIDIA Nemotron on Nebius Token Factory
-
-Every model call goes to Nebius Token Factory's OpenAI-compatible API. FailFirst routes each step to the
-smallest Nemotron model that does it well:
-
-| Tier | Default model | Used for | Why this tier |
-|---|---|---|---|
-| **Nano** | `nvidia/Nemotron-3-Nano-30B-A3B` | Triage of the issue; judging whether a failing test genuinely reproduces the bug | High-volume classification calls; low latency keeps the loop fast |
-| **Super** | `nvidia/Nemotron-3-Super-120b-a12b` | Investigating the codebase (tool-using loop), writing the reproduction test, writing patches in each branch | Strong coding at a cost that allows many parallel attempts |
-| **Ultra** | `nvidia/Nemotron-3-Ultra-550b-a55b` | Planning distinct fix strategies; reviewing passing candidates and writing the PR | The two decisions where deeper reasoning changes the outcome |
-
-The UI shows which tier made every call, with token counts per model.
-
-## How it uses Nebius Sandboxes
-
-Running model-written code needs isolation. FailFirst executes everything (dependency install, the baseline suite,
-reproduction attempts, every patch) in [Nebius Sandboxes](https://docs.tokenfactory.nebius.com/sandboxes/overview)
-through `contree-sdk`. Each run is a fresh microVM. The agent relies on Sandboxes' checkpoint-and-branch model:
+Its standout feature is **`/fix`**, which never hands you a patch it hasn't proven:
 
 ```
-python:3.12-slim ──install──▶ [env-ready] ──add repro test──▶ [bug-reproduced] ─┬─▶ branch B1: patch + tests
-                                    │                                           ├─▶ branch B2: patch + tests
-                                    └──▶ baseline test suite                    └─▶ branch B3: patch + tests
+/fix Invoice totals are a cent short when tax lands on a half cent
 ```
 
-Branches are disposable runs from the same immutable image, so they can't interfere with each other, and a
-failed attempt never pollutes the next one. The source code is read on the host (read-only) for fast exploration;
-it is only ever *executed* inside the sandbox.
+1. **Investigate.** Nemotron Super explores the code with read-only tools and reports the root cause.
+2. **Reproduce.** It writes a new test that must **fail on your current code**. A Nemotron Nano judge rejects
+   tests that fail for the wrong reason (import errors, typos, asserting something unrelated). If ember can't
+   reproduce the bug, it stops and tells you so instead of guessing.
+3. **Plan.** Nemotron Ultra proposes several genuinely different fix strategies.
+4. **Branch.** Each strategy runs in its own **git worktree**, in parallel, with its own patching loop. Test files
+   are read-only inside a branch, so a fix can't "pass" by weakening the test.
+5. **Verify.** A branch wins only if the reproduction test passes **and** the full test suite has no new failures
+   compared with a baseline run.
+6. **Review & apply.** Ultra picks the best passing candidate and explains why. You see the diff (fix +
+   regression test) and decide whether to apply it to your working tree.
 
-For local development without Sandboxes access, a Podman backend mimics the same model (`podman commit` for
-checkpoints, disposable containers for branches, no network during test runs).
+Your working tree is never touched until you approve. Uncommitted changes are included in the experiment through
+`git stash create`, which snapshots them without modifying anything.
 
-## Running it
+Hackathon track: **Coding and Agentic Engineering** (Nebius × NVIDIA Global AI Hackathon).
 
-Requirements: Python 3.12, [uv](https://docs.astral.sh/uv/), a Nebius Token Factory API key, and either
-Nebius Sandboxes access or Podman.
+## How it uses Nemotron on Nebius Token Factory
+
+Every model call goes to Token Factory's OpenAI-compatible API, with streaming and native tool calling.
+ember routes each kind of work to the smallest Nemotron model that does it well:
+
+| Tier | Default model | Used for |
+|---|---|---|
+| **Nano** | `nvidia/Nemotron-3-Nano-30B-A3B` | `/fix` judgements: does this failing test really reproduce the bug? did the suite regress? |
+| **Super** | `nvidia/Nemotron-3-Super-120b-a12b` | The interactive agent; `/fix` investigation, test writing, and every branch's patching loop |
+| **Ultra** | `nvidia/Nemotron-3-Ultra-550b-a55b` | `/fix` strategy planning and choosing between passing candidates |
+
+Switch the interactive model at any time with `/model nano|super|ultra` (or any model id from `/models`).
+Nemotron's reasoning is streamed live in the UI (from `reasoning_content` or inline `<think>` blocks) and kept out of the transcript.
+
+## Install
+
+Requires Rust 1.80+ and git.
 
 ```bash
-git clone <this repo> failfirst && cd failfirst
-uv sync
-cp .env.example .env     # add NEBIUS_API_KEY (and NEBIUS_PROJECT_ID for Sandboxes)
-uv run failfirst models  # list the Nemotron model ids your key can use
+git clone https://github.com/aneesh-pradhan/ember && cd ember
+cargo install --path .
 ```
 
-Web UI:
+Put your Token Factory key in `~/.config/ember/env` (or a `.env` in the project you run it from):
 
 ```bash
-uv run failfirst serve   # http://127.0.0.1:8000
+mkdir -p ~/.config/ember && echo 'NEBIUS_API_KEY=your-key' >> ~/.config/ember/env
 ```
 
-Command line:
+## Use
 
 ```bash
-# A GitHub issue
-uv run failfirst run https://github.com/owner/repo/issues/123
-
-# Or any repo (GitHub URL or local path) plus a description
-uv run failfirst run --repo examples/tinyledger --description "$(cat examples/tinyledger/ISSUE.md)"
+cd your-project
+ember                         # interactive session
+ember "why does the build fail?"   # start with a prompt
+ember -p "summarize src/" # print mode: answer and exit (edits/commands denied unless --yes)
+ember --model ultra           # pick the model tier
 ```
 
-Each run is saved to `runs/<id>.jsonl` and can be replayed in the UI.
-Setting `FAILFIRST_ALLOW_LIVE_RUNS=false` makes a public deployment replay-only.
+| Command | |
+|---|---|
+| `/fix <bug or GitHub issue URL>` | Reproduce with a failing test, fix in parallel worktrees, verify, apply on approval |
+| `/model [nano\|super\|ultra\|id]` | Show or switch the model |
+| `/models` | List Nemotron models available to your key |
+| `/auto` or Shift+Tab | Toggle auto-approve for edits and commands |
+| `/usage` | Token usage per model this session |
+| `/clear` | Start a new conversation |
+| `/quit` | Exit (or Ctrl+C twice) |
+
+Keys: Enter sends, Alt+Enter or Ctrl+J inserts a newline, Esc interrupts, ↑/↓ browse history.
+
+ember reads project instructions from `AGENTS.md` or `EMBER.md` in the working directory.
 
 ### Configuration
 
-| Variable | Default | Meaning |
-|---|---|---|
-| `NEBIUS_API_KEY` | (required) | Token Factory API key |
-| `NEBIUS_PROJECT_ID` | (unset) | Enables Nebius Sandboxes; otherwise Podman is used |
-| `FAILFIRST_MODEL_FAST` / `_CODER` / `_REASONER` | see table above | Model id per tier |
-| `FAILFIRST_BRANCHES` | `3` | Parallel fix branches |
-| `FAILFIRST_MAX_REPRO_ATTEMPTS` | `4` | Attempts at a genuine reproduction |
-| `FAILFIRST_MAX_FIX_ROUNDS` | `3` | Patch/test rounds per branch |
-| `GITHUB_TOKEN` | (unset) | Higher GitHub API rate limit |
+| Variable | Default |
+|---|---|
+| `NEBIUS_API_KEY` | required |
+| `NEBIUS_BASE_URL` | `https://api.tokenfactory.nebius.com/v1/` |
+| `EMBER_MODEL_FAST` / `EMBER_MODEL_CODER` / `EMBER_MODEL_REASONER` | the models in the table above |
+| `EMBER_FIX_BRANCHES` | `3` (1 to 4) |
+| `EMBER_TEST_CMD` | detected: `cargo test`, `go test ./...`, `pytest`, or `npm test` |
 
-### Scope
+## Try `/fix` on the demo project
 
-FailFirst currently targets Python projects tested with pytest that install with `pip install -e .` or a
-requirements file.
-
-## Tests
+`examples/tinyledger` is a small invoicing library with a real rounding bug (see its `ISSUE.md`):
 
 ```bash
-uv run pytest
+cd examples/tinyledger
+EMBER_TEST_CMD="uvx pytest -q" ember
+/fix Invoice totals are a cent short: 2.50 with 5% tax gives tax 0.12, should be 0.13
 ```
 
-`tests/test_pipeline_podman.py` runs the whole pipeline against the bundled `examples/tinyledger` repository in
-real Podman containers, with a scripted model standing in for Nemotron, so the orchestration is tested without spending tokens.
-
-## Project layout
+## Design
 
 ```
-failfirst/
-  agent.py          the pipeline: triage → investigate → reproduce → plan → fix branches → review
-  llm.py            Token Factory client, per-tier routing and usage accounting
-  repo.py           in-memory repo snapshot: search, SEARCH/REPLACE edits, diffs; GitHub fetching
-  sandbox/          Nebius Sandboxes and Podman backends behind one checkpoint/branch interface
-  server.py         FastAPI app with server-sent events and run replay
-  prompts.py        prompts for each step
-web/                the UI (no build step)
-examples/tinyledger a small library with a real rounding bug, used for the demo and tests
+src/
+  main.rs      CLI (interactive, print mode)
+  ui.rs        Ratatui inline-viewport TUI: scrollback transcript, live area, approvals, /fix progress
+  agent.rs     agent loop: stream → tool calls → approval → results → repeat; cancellation-safe history
+  fix.rs       /fix pipeline over git worktrees
+  llm.rs       streaming OpenAI-compatible client: SSE, tool-call assembly, <think> splitting, retries
+  tools.rs     read_file, list_files, grep (.gitignore-aware), edit_file, write_file, bash
+  markdown.rs  Markdown rendering and word wrapping for the terminal
+```
+
+```bash
+cargo test
 ```
 
 ## License
