@@ -33,10 +33,14 @@ esac
 target="$arch-$os"
 
 if [ "$VERSION" = "latest" ]; then
-    # The latest-release page redirects to .../releases/tag/<tag>.
-    url=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest") ||
-        die "could not reach GitHub"
-    VERSION="${url##*/}"
+    # Ask the API (always current); fall back to the latest-release redirect, which can lag behind.
+    VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null |
+        sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1)
+    if [ -z "$VERSION" ]; then
+        url=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest") ||
+            die "could not reach GitHub"
+        VERSION="${url##*/}"
+    fi
     [ -n "$VERSION" ] && [ "$VERSION" != "latest" ] || die "could not determine the latest release"
 fi
 
