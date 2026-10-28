@@ -1,5 +1,10 @@
 # ember
 
+[![CI](https://github.com/aneesh-pradhan/ember/actions/workflows/ci.yml/badge.svg)](https://github.com/aneesh-pradhan/ember/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/aneesh-pradhan/ember)](https://github.com/aneesh-pradhan/ember/releases/latest)
+[![License: MIT](https://img.shields.io/github/license/aneesh-pradhan/ember)](LICENSE)
+![Rust 1.80+](https://img.shields.io/badge/rust-1.80%2B-orange)
+
 **A terminal coding agent powered by NVIDIA Nemotron on Nebius Token Factory, written in Rust.**
 
 ember lives in your terminal. Ask it to explain code, build a feature, or fix a failing build. It reads
@@ -7,7 +12,21 @@ and searches your project, edits files, and runs commands. Before any edit or co
 the diff or the command line and asks for approval. The conversation stays in your terminal's normal
 scrollback, so you can scroll, search, and copy it like any other output.
 
-Its standout feature is **`/fix`**, which never hands you a patch it hasn't proven:
+<!-- Demo: record a short GIF of /fix (failing test, then the passing fix) and add it here,
+     e.g. ![ember running /fix](docs/demo.gif) -->
+
+## Contents
+
+- [`/fix`: a bug proven before it's fixed](#fix-a-bug-proven-before-its-fixed)
+- [How it uses Nemotron](#how-it-uses-nemotron-on-nebius-token-factory)
+- [Install](#install)
+- [Use](#use)
+- [Configuration](docs/configuration.md) and [running on your own hardware](docs/configuration.md#run-nemotron-on-your-own-hardware)
+- [Design](#design)
+
+## `/fix`: a bug proven before it's fixed
+
+`/fix` never hands you a patch it hasn't proven:
 
 ```
 /fix Invoice totals are a cent short when tax lands on a half cent
@@ -28,8 +47,6 @@ Its standout feature is **`/fix`**, which never hands you a patch it hasn't prov
 Your working tree is never touched until you approve. Uncommitted changes are included in the experiment through
 `git stash create`, which snapshots them without modifying anything.
 
-Hackathon track: **Coding and Agentic Engineering** (Nebius × NVIDIA Global AI Hackathon).
-
 ## How it uses Nemotron on Nebius Token Factory
 
 Every model call goes to Token Factory's OpenAI-compatible API, with streaming and native tool calling.
@@ -43,103 +60,64 @@ ember routes each kind of work to the smallest Nemotron model that does it well:
 | **Super VL** | `nvidia/Nemotron-3.5-Super-VL` | ember's eyes: reads screenshots and diagrams you attach, and images the agent opens with `view_image` |
 
 Switch the interactive model at any time with `/model nano|super|ultra` (or any model id from `/models`), and its
-reasoning with `/think on|low|off` (or `--think`).
-Nemotron's reasoning is streamed live in the UI (from `reasoning_content` or inline `<think>` blocks) and kept out of the transcript.
+reasoning with `/think on|low|off` (or `--think`). Nemotron's reasoning is streamed live in the UI and kept out of
+the transcript.
 
-### Tuned for Nemotron on Token Factory
-
-These choices come from measuring the models on Token Factory, not from defaults:
-
-- **Reasoning only where it pays.** `enable_thinking: false` turns reasoning off on every Nemotron 3 model, while a
-  `/no_think` system prompt is ignored, and `reasoning_effort: "low"` only shortens it reliably on Super. ember turns
-  reasoning off for mechanical drafting (commit messages, branch names, PR text): on a real diff that took commit
-  drafts from 2.0–2.6 s to 1.0–1.5 s with 3–4× fewer output tokens and equally good messages. It stays **on**
-  where accuracy matters: Nano with thinking off answered "is 91 prime?" wrongly, so the `/fix` judge keeps it, and
-  Super VL describes screenshots just as accurately either way, so it keeps its default too. For the interactive
-  agent, on, low and off all took about 4–6 s on an exploration task (time goes to round trips, not thinking), and
-  `off` started narrating its steps into the answer, so the default is `on`.
-- **Batched reads.** Nemotron Super makes one tool call per reply, even with `parallel_tool_calls` and an explicit
-  hint, so every extra file costs a round trip that resends the conversation. `read_file` accepts a list of `paths`
-  and the prompt tells the model to batch; in testing it read related files together and grounded answers in
-  more of the code at the same cost.
-- **Prompt-cache friendly.** Token Factory caches repeated prompt prefixes (4,512 of 4,533 tokens on a repeat
-  request), billed at a lower rate. ember keeps the system prompt and the tool list fixed for each turn, so the
-  growing conversation is re-sent as a stable prefix, and `/usage` shows how much input came from the cache
-  (up to 99% on warm runs).
+ember is tuned for these models on Token Factory: it turns reasoning off for mechanical drafting, batches file
+reads into single tool calls, and keeps the prompt prefix stable so repeat requests hit the cache. The measurements
+and reasoning are in [docs/tuning.md](docs/tuning.md).
 
 ## Install
 
 ember runs on **macOS** (Apple Silicon and Intel) and **Linux** (x86_64 and ARM64, any distribution).
 You need `git`, plus a [Nebius Token Factory API key](https://tokenfactory.nebius.com/project/api-keys).
 
-### macOS
+**1. Install** (macOS or Linux):
 
-1. Install ember. Open Terminal (or iTerm2, Ghostty, WezTerm…) and run:
+```bash
+curl -fsSL https://raw.githubusercontent.com/aneesh-pradhan/ember/main/install.sh | sh
+```
 
-   ```bash
-   curl -fsSL https://raw.githubusercontent.com/aneesh-pradhan/ember/main/install.sh | sh
-   ```
+The installer downloads the matching binary from [Releases](https://github.com/aneesh-pradhan/ember/releases),
+verifies its SHA-256 checksum, and installs it to `~/.local/bin`.
 
-2. Put `~/.local/bin` on your PATH. macOS uses zsh by default; the installer prints the exact line if needed:
+**2. Add `~/.local/bin` to your PATH** if the installer says it's missing:
 
-   ```bash
-   echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
-   ```
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc   # macOS (zsh)
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc # Linux (bash)
+```
 
-3. Add your API key:
+**3. Add your API key:**
 
-   ```bash
-   mkdir -p ~/.config/ember
-   printf 'NEBIUS_API_KEY=%s\n' 'your-key' > ~/.config/ember/env && chmod 600 ~/.config/ember/env
-   ```
+```bash
+(umask 077; mkdir -p ~/.config/ember && printf 'NEBIUS_API_KEY=%s\n' 'your-key' > ~/.config/ember/env)
+```
 
-4. `git` comes with the Xcode Command Line Tools. If `git --version` asks you to install them, accept, or run
-   `xcode-select --install`.
+Then run `ember` inside any project.
 
-Notes for macOS:
-- Terminal.app may not show 24-bit color, so ember switches to a 256-color palette there automatically. For the
-  best colors, use iTerm2, Ghostty, WezTerm, Kitty or the VS Code terminal. Set `EMBER_COLORS=256` or
-  `EMBER_COLORS=truecolor` to override.
-- If you download a release archive **in a browser** instead of using the installer, macOS quarantines the
-  binary. Clear the flag with `xattr -d com.apple.quarantine ./ember`.
-- To build from source instead: install the Xcode Command Line Tools and Rust
-  (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`, or `brew install rust`), then
-  `cargo install --git https://github.com/aneesh-pradhan/ember`.
+### Platform notes
 
-### Linux
+- **macOS:** `git` comes with the Xcode Command Line Tools (`xcode-select --install`). Terminal.app may not show
+  24-bit color, so ember switches to a 256-color palette there. For the best colors use iTerm2, Ghostty, WezTerm,
+  Kitty or the VS Code terminal; set `EMBER_COLORS=256` or `EMBER_COLORS=truecolor` to override.
+- **macOS browser downloads:** if you download a release archive in a browser instead of using the installer,
+  clear the quarantine flag with `xattr -d com.apple.quarantine ./ember`.
+- **Linux:** the builds are fully static (musl), so they work on any distribution.
 
-1. Install ember:
+### Build from source
 
-   ```bash
-   curl -fsSL https://raw.githubusercontent.com/aneesh-pradhan/ember/main/install.sh | sh
-   ```
+Install Rust 1.80+ (via [rustup](https://rustup.rs), Homebrew, or your package manager), then:
 
-   The Linux builds are fully static (musl), so they work on any distribution.
-
-2. If `~/.local/bin` isn't on your PATH (the installer tells you), add it:
-
-   ```bash
-   echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
-   ```
-
-3. Add your API key:
-
-   ```bash
-   mkdir -p ~/.config/ember
-   printf 'NEBIUS_API_KEY=%s\n' 'your-key' > ~/.config/ember/env && chmod 600 ~/.config/ember/env
-   ```
-
-To build from source on Linux: install Rust 1.80+ (via [rustup](https://rustup.rs) or your package manager)
-and run `cargo install --git https://github.com/aneesh-pradhan/ember`.
+```bash
+cargo install --git https://github.com/aneesh-pradhan/ember
+```
 
 ### Installer options, updating and uninstalling
 
-- The installer downloads the matching binary from [Releases](https://github.com/aneesh-pradhan/ember/releases),
-  verifies its SHA-256 checksum, and installs it to `~/.local/bin`.
-- `EMBER_INSTALL_DIR=/some/dir` installs elsewhere; `EMBER_VERSION=v0.5.0` pins a version.
+- `EMBER_INSTALL_DIR=/some/dir` installs elsewhere; `EMBER_VERSION=vX.Y.Z` pins a release.
 - **Update:** run the same one-liner again. **Uninstall:** `rm ~/.local/bin/ember`.
-- The key can also live in a `.env` file in the project you run ember from. Saved conversations are stored in
-  `~/.local/share/ember` on Linux and `~/Library/Application Support/ember` on macOS.
+- Saved conversations live in `~/.local/share/ember` on Linux and `~/Library/Application Support/ember` on macOS.
 
 ## Use
 
@@ -203,10 +181,10 @@ ember reads project instructions from `AGENTS.md` or `EMBER.md` in the working d
 - **Images:** mention a screenshot with `@shot.png`, or drag an image file into the terminal. Nemotron Super VL
   describes it (transcribing any text exactly) for the coding model. The agent can also look at images in your
   repo with `view_image`.
-- **Web:** the agent can read pages with `web_fetch`. Set `TAVILY_API_KEY` ([tavily.com](https://tavily.com)) to also give it
-  `web_search`, and to have `web_fetch` use Tavily Extract for cleaner pages.
-- **MCP servers:** add stdio servers to `.ember/mcp.json` (per project) or `~/.config/ember/mcp.json`, in the
-  usual format. Each tool call asks for permission (or "always" for that tool):
+- **Web:** the agent can read pages with `web_fetch`. Set `TAVILY_API_KEY` ([tavily.com](https://tavily.com)) to also
+  give it `web_search`, and to have `web_fetch` use Tavily Extract for cleaner pages.
+- **MCP servers:** add stdio servers to `.ember/mcp.json` (per project) or `~/.config/ember/mcp.json`, in the usual
+  format. Each tool call asks for permission (or "always" for that tool):
 
   ```json
   {"mcpServers": {"github": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"],
@@ -226,41 +204,11 @@ description: Explain a file to a beginner
 Explain $ARGUMENTS to someone new to this codebase, in five bullet points.
 ```
 
-### Run Nemotron on your own hardware
-
-ember speaks the OpenAI-compatible API, so it can drive a model served from your own machine, such as a
-Jetson dev kit or a workstation GPU. Start an OpenAI-compatible server (for example llama.cpp's `llama-server`,
-vLLM, or an NVIDIA NIM) with a Nemotron model that supports tool calling, then point ember at it:
-
-```bash
-EMBER_BASE_URL=http://jetson.local:8000/v1 \
-EMBER_MODEL_CODER=<model name your server reports> \
-ember
-```
-
-No Nebius key is needed for a local server. Pick a model that fits the device's memory, and set
-`EMBER_MODEL_FAST` / `EMBER_MODEL_REASONER` too if you use `/fix` or `/review`.
-
-### Configuration
-
-| Variable | Default |
-|---|---|
-| `NEBIUS_API_KEY` | required for Token Factory |
-| `EMBER_BASE_URL` (or `NEBIUS_BASE_URL`) | `https://api.tokenfactory.nebius.com/v1/` |
-| `EMBER_MODEL_VISION` | `nvidia/Nemotron-3.5-Super-VL` |
-| `TAVILY_API_KEY` | unset; enables `web_search` |
-| `EMBER_MODEL_FAST` / `EMBER_MODEL_CODER` / `EMBER_MODEL_REASONER` | the models in the table above |
-| `EMBER_FIX_BRANCHES` | `3` (1 to 4) |
-| `EMBER_THINK` | `on`; `low` or `off` for faster, shallower replies (same as `--think` / `/think`) |
-| `EMBER_MOUSE` | `on`; `off` keeps your terminal's normal text selection (no wheel scrolling) |
-| `EMBER_COLORS` | auto; `256` or `truecolor` to override color detection |
-| `EMBER_TEST_CMD` | detected: `cargo test`, `go test ./...`, `pytest`, or `npm test` |
-
-## Try `/fix` on the demo project
+### Try `/fix` on the demo project
 
 `examples/tinyledger` is a small invoicing library with a real rounding bug (see its `ISSUE.md`). Its tests run
-with [uv](https://docs.astral.sh/uv/): `brew install uv` on macOS, or
-`curl -LsSf https://astral.sh/uv/install.sh | sh` on either OS.
+with [uv](https://docs.astral.sh/uv/): `brew install uv` on macOS, or `curl -LsSf https://astral.sh/uv/install.sh | sh`
+on either OS.
 
 ```bash
 git clone https://github.com/aneesh-pradhan/ember && cd ember/examples/tinyledger
@@ -273,7 +221,10 @@ EMBER_TEST_CMD="uvx pytest -q" ember
 ```
 src/
   main.rs      CLI (interactive, print mode)
+  config.rs    settings from the environment, ~/.config/ember/env, and a project .env
   ui.rs        full-screen Ratatui TUI: conversation, prompt box, suggestions, permission panel, status line
+  input.rs     multi-line line editor with history
+  theme.rs     palette: warm accents on whatever background the terminal has
   agent.rs     agent loop: stream → tool calls → approval → results → repeat; checkpoints for /undo
   fix.rs       /fix pipeline over git worktrees
   git.rs       /commit, /branch, /pr and git status
@@ -288,10 +239,19 @@ src/
   logo.rs      the chibi mascot
 ```
 
+## Development
+
 ```bash
+cargo build
 cargo test
 ```
 
+Issues and pull requests are welcome on [GitHub](https://github.com/aneesh-pradhan/ember/issues).
+
 ## License
 
-MIT
+[MIT](LICENSE)
+
+---
+
+Built for the Nebius × NVIDIA Global AI Hackathon (Coding and Agentic Engineering track).
