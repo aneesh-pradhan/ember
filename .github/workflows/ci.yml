@@ -14,8 +14,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked
+      - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
 
   # Runs the published installer the way users do, then starts the installed binary.
