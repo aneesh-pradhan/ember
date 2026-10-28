@@ -1,4 +1,26 @@
-/target
+# Rust build output (Cargo.lock is committed: ember is a binary)
+/target/
+**/*.rs.bk
+*.pdb
+
+# Secrets (.env.example stays tracked)
 .env
+.env.*
+!.env.example
+
+# Python: examples/tinyledger and the bench harness
 __pycache__/
-*.pyc
+*.py[cod]
+.pytest_cache/
+.venv/
+*.egg-info/
+
+# Bench scratch output (default --out); dated runs in bench/results/ are kept
+/bench/results.jsonl
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
