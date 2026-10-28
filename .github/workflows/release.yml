@@ -12,9 +12,10 @@ jobs:
     strategy:
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
+          # Static musl builds run on any Linux distribution.
+          - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
-          - target: aarch64-unknown-linux-gnu
+          - target: aarch64-unknown-linux-musl
             os: ubuntu-24.04-arm
           - target: aarch64-apple-darwin
             os: macos-latest
@@ -26,6 +27,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - if: contains(matrix.target, 'musl')
+        run: sudo apt-get update -q && sudo apt-get install -y -q musl-tools
       - run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Package
         run: |
@@ -33,7 +36,10 @@ jobs:
           mkdir "$name"
           cp target/${{ matrix.target }}/release/ember README.md LICENSE "$name"/
           tar czf "$name.tar.gz" "$name"
+          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
       - uses: softprops/action-gh-release@v2
         with:
-          files: ember-*.tar.gz
+          files: |
+            ember-*.tar.gz
+            ember-*.tar.gz.sha256
           generate_release_notes: true

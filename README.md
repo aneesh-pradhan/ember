@@ -46,17 +46,27 @@ Nemotron's reasoning is streamed live in the UI (from `reasoning_content` or inl
 
 ## Install
 
-Requires Rust 1.80+ and git.
+On Linux (x86_64 or ARM64, any distribution) or macOS (Apple Silicon or Intel):
 
 ```bash
-git clone https://github.com/aneesh-pradhan/ember && cd ember
-cargo install --path .
+curl -fsSL https://raw.githubusercontent.com/aneesh-pradhan/ember/main/install.sh | sh
 ```
 
-Put your Token Factory key in `~/.config/ember/env` (or a `.env` in the project you run it from):
+The script downloads the matching binary from [Releases](https://github.com/aneesh-pradhan/ember/releases),
+verifies its SHA-256 checksum, and installs it to `~/.local/bin`. Set `EMBER_INSTALL_DIR` to choose another
+directory, or `EMBER_VERSION=v0.1.1` to pin a version. To uninstall, delete `~/.local/bin/ember`.
+
+Or build from source (Rust 1.80+):
 
 ```bash
-mkdir -p ~/.config/ember && echo 'NEBIUS_API_KEY=your-key' >> ~/.config/ember/env
+cargo install --git https://github.com/aneesh-pradhan/ember
+```
+
+Then put your Token Factory key in `~/.config/ember/env` (or a `.env` in the project you run it from):
+
+```bash
+mkdir -p ~/.config/ember
+printf 'NEBIUS_API_KEY=%s\n' 'your-key' > ~/.config/ember/env && chmod 600 ~/.config/ember/env
 ```
 
 ## Use
