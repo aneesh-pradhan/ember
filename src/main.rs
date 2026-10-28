@@ -3,6 +3,7 @@ mod config;
 mod fix;
 mod input;
 mod llm;
+mod logo;
 mod markdown;
 mod theme;
 mod tools;

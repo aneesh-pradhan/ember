@@ -22,6 +22,7 @@ use crate::agent::{Agent, AgentEvent, ApprovalRequest, Decision, Events};
 use crate::config::{Config, Tier};
 use crate::fix::{self, FixEvent, Status};
 use crate::input::Input;
+use crate::logo;
 use crate::llm::Client;
 use crate::markdown;
 use crate::theme;
@@ -155,20 +156,8 @@ impl App {
         let cwd = self.cwd.display().to_string();
         let home = dirs::home_dir().map(|h| h.display().to_string()).unwrap_or_default();
         let cwd = if !home.is_empty() && cwd.starts_with(&home) { cwd.replacen(&home, "~", 1) } else { cwd };
-        self.print([
-            Line::default(),
-            Line::from(vec![
-                Span::styled("  ◆ ", theme::accent()),
-                Span::styled("ember", theme::bold()),
-                Span::styled(format!("  v{}", env!("CARGO_PKG_VERSION")), theme::dim()),
-            ]),
-            Line::from(vec![
-                Span::styled("    coding agent on NVIDIA Nemotron · ", theme::dim()),
-                Span::styled(self.config.coder.clone(), theme::tier(Tier::Coder)),
-            ]),
-            Line::styled(format!("    {cwd} · /help for commands · /fix <bug> to prove it, then fix it"), theme::dim()),
-            Line::default(),
-        ]);
+        let model = self.config.coder.clone();
+        self.print(logo::banner(&model, &cwd));
         if self.config.api_key.is_none() {
             self.print_line(Line::styled(
                 "  ! NEBIUS_API_KEY is not set. Add it to .env or ~/.config/ember/env, then restart.",
@@ -703,11 +692,12 @@ impl App {
         let doing = self.live_tool.clone().unwrap_or_else(|| {
             if self.live_reasoning.is_empty() || !self.live_text.is_empty() { "Working".into() } else { "Reasoning".into() }
         });
-        lines.push(Line::from(vec![
-            Span::styled(format!("{spinner} "), theme::accent()),
+        let mut status = logo::mini(self.frame);
+        status.extend([
             Span::styled(tools::one_line(&doing, width as usize / 2), theme::code()),
             Span::styled(format!("  {elapsed}s · esc to interrupt"), theme::dim()),
-        ]));
+        ]);
+        lines.push(Line::from(status));
         lines
     }
 
