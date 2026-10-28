@@ -57,8 +57,8 @@ impl Config {
         Config {
             api_key: env::var("NEBIUS_API_KEY").ok().filter(|v| !v.is_empty()),
             base_url: var("NEBIUS_BASE_URL", DEFAULT_BASE_URL),
-            fast: var("EMBER_MODEL_FAST", "nvidia/Nemotron-3-Nano-30B-A3B"),
-            coder: var("EMBER_MODEL_CODER", "nvidia/Nemotron-3-Super-120b-a12b"),
+            fast: var("EMBER_MODEL_FAST", "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B"),
+            coder: var("EMBER_MODEL_CODER", "nvidia/nemotron-3-super-120b-a12b"),
             reasoner: var("EMBER_MODEL_REASONER", "nvidia/Nemotron-3-Ultra-550b-a55b"),
             fix_branches: var("EMBER_FIX_BRANCHES", "3").parse().unwrap_or(3).clamp(1, 4),
             test_cmd: env::var("EMBER_TEST_CMD").ok().filter(|v| !v.is_empty()),

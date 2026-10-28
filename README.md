@@ -37,8 +37,8 @@ ember routes each kind of work to the smallest Nemotron model that does it well:
 
 | Tier | Default model | Used for |
 |---|---|---|
-| **Nano** | `nvidia/Nemotron-3-Nano-30B-A3B` | `/fix` judgements: does this failing test really reproduce the bug? did the suite regress? |
-| **Super** | `nvidia/Nemotron-3-Super-120b-a12b` | The interactive agent; `/fix` investigation, test writing, and every branch's patching loop |
+| **Nano** | `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B` | `/fix` judgements: does this failing test really reproduce the bug? did the suite regress? |
+| **Super** | `nvidia/nemotron-3-super-120b-a12b` | The interactive agent; `/fix` investigation, test writing, and every branch's patching loop |
 | **Ultra** | `nvidia/Nemotron-3-Ultra-550b-a55b` | `/fix` strategy planning and choosing between passing candidates |
 
 Switch the interactive model at any time with `/model nano|super|ultra` (or any model id from `/models`).
