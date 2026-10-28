@@ -370,12 +370,17 @@ async fn reproduce(ctx: &Ctx, root: &Path, issue: &str, report: &Value, prefix: 
             "command": {"type": "string", "description": "Shell command, run from the project directory, that runs just this test"}},
             "required": ["path", "content", "command"]}),
     );
+    let mut specs = tools::specs(true);
+    specs.push(submit);
     let mut messages = vec![
         Message::system(
             "You write a test that REPRODUCES a reported bug. It must FAIL on the current code because of the bug, \
-             and PASS once the bug is fixed. Assert the correct (expected) behavior, not the buggy one. Use the public \
-             API, follow the project's test conventions, keep it small and deterministic, and do not mock the code \
-             under test. The file must be new: do not overwrite an existing file.",
+             and PASS once the bug is fixed. Assert the correct (expected) behavior, not the buggy one.\n\
+             First use the read-only tools to read the code under test and at least one existing test, so you call \
+             the real API with the right names and signatures and import it the way existing tests do. Never guess \
+             method names. Then call `submit_test`. Keep the test small and deterministic, do not mock the code under \
+             test, and use a NEW file: never overwrite an existing one. Each submission is run and checked; you will \
+             get the result back.",
         ),
         Message::user(format!(
             "BUG REPORT\n{issue}\n\nINVESTIGATION\n{}\n\nThe project's full test command is `{test_cmd}` (run from the \
@@ -383,37 +388,68 @@ async fn reproduce(ctx: &Ctx, root: &Path, issue: &str, report: &Value, prefix: 
             serde_json::to_string_pretty(report).unwrap_or_default()
         )),
     ];
-    for attempt in 1..=4 {
-        let args = ctx.structured(Tier::Coder, messages.clone(), submit.clone()).await?;
-        let path = args["path"].as_str().unwrap_or("").trim().to_string();
-        let code = args["content"].as_str().unwrap_or("").to_string();
-        let command = args["command"].as_str().unwrap_or("").to_string();
-        messages.push(Message::assistant(format!("Submitted {path}, run with `{command}`:\n```\n{code}\n```"), vec![]));
-
-        let ws = Workspace::new(root.to_path_buf());
-        let target = match ws.resolve(&path) {
-            Ok(t) if !path.is_empty() && !t.exists() => t,
-            _ => {
-                messages.push(Message::user(format!("`{path}` is not a valid new file path. Pick a new file inside the project.")));
+    let ws = Workspace::new(root.to_path_buf());
+    let mut attempt = 0;
+    for _ in 0..30 {
+        let resp = ctx
+            .chat(Tier::Coder, Request {
+                messages: messages.clone(),
+                tools: specs.clone(),
+                max_tokens: Some(8192),
+                ..Default::default()
+            })
+            .await?;
+        messages.push(Message::assistant(resp.content.clone(), resp.tool_calls.clone()));
+        if resp.tool_calls.is_empty() {
+            messages.push(Message::user("Use the tools to check the code, then call `submit_test`."));
+            continue;
+        }
+        for call in &resp.tool_calls {
+            let args = call.args();
+            if call.function.name != "submit_test" {
+                ctx.send(FixEvent::Activity(tools::summary(&call.function.name, &args)));
+                let out = tools::run(&ws, &call.function.name, &args).await.unwrap_or_else(|e| format!("Error: {e}"));
+                messages.push(Message::tool(call.id.clone(), out));
                 continue;
             }
-        };
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)?;
+            let path = args["path"].as_str().unwrap_or("").trim().to_string();
+            let mut code = args["content"].as_str().unwrap_or("").to_string();
+            if !code.is_empty() && !code.ends_with('\n') {
+                code.push('\n');
+            }
+            let command = args["command"].as_str().unwrap_or("").to_string();
+            let target = match ws.resolve(&path) {
+                Ok(t) if !path.is_empty() && !code.is_empty() && !t.exists() => t,
+                _ => {
+                    messages.push(Message::tool(call.id.clone(), format!("`{path}` is not a valid NEW file path (or content is empty).")));
+                    continue;
+                }
+            };
+            attempt += 1;
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&target, &code)?;
+            ctx.send(FixEvent::Activity(format!("running {command}")));
+            let out = run_command(root, &format!("{prefix}{command}"), TEST_TIMEOUT).await;
+            let (confirmed, reason) = judge(ctx, issue, &code, &out).await?;
+            ctx.send(FixEvent::Repro { attempt, path: path.clone(), code: code.clone(), output: tail(&out.output, 2500), confirmed, reason: reason.clone() });
+            if confirmed {
+                return Ok(Repro { path, code, command, failure: tail(&out.output, 3000) });
+            }
+            std::fs::remove_file(&target)?;
+            if attempt >= 4 {
+                break;
+            }
+            messages.push(Message::tool(call.id.clone(), format!(
+                "Result: {}\n{}\n\nRejected: {reason}\nFix the test (check the real API with the tools if needed) and submit again.",
+                if out.timed_out { "timed out".to_string() } else { format!("exit code {:?}", out.code) },
+                tail(&out.output, 3000)
+            )));
         }
-        std::fs::write(&target, &code)?;
-        let out = run_command(root, &format!("{prefix}{command}"), TEST_TIMEOUT).await;
-        let (confirmed, reason) = judge(ctx, issue, &code, &out).await?;
-        ctx.send(FixEvent::Repro { attempt, path: path.clone(), code: code.clone(), output: tail(&out.output, 2500), confirmed, reason: reason.clone() });
-        if confirmed {
-            return Ok(Repro { path, code, command, failure: tail(&out.output, 3000) });
+        if attempt >= 4 {
+            break;
         }
-        std::fs::remove_file(&target)?;
-        messages.push(Message::user(format!(
-            "Result: {}\n{}\n\nThat does not count as a reproduction: {reason}\nSubmit a corrected test.",
-            if out.timed_out { "timed out".to_string() } else { format!("exit code {:?}", out.code) },
-            tail(&out.output, 3000)
-        )));
     }
     ctx.stage("Reproduce", Status::Failed, "could not reproduce");
     bail!("couldn't write a test that reproduces this bug, so no fix was attempted (ember won't ship a patch it can't verify)")
@@ -463,7 +499,7 @@ async fn plan(ctx: &Ctx, issue: &str, report: &Value, repro: &Repro) -> Result<V
             Message::system(format!(
                 "You are a senior engineer. A bug has a failing reproduction test. Propose {n} genuinely DIFFERENT fix \
                  strategies (different locations, mechanisms or scope, not rewordings of one idea). Prefer fixing the \
-                 root cause over special-casing the test's inputs."
+                 root cause over special-casing the test's inputs, and avoid changing global or process-wide state."
             )),
             Message::user(format!(
                 "BUG REPORT\n{issue}\n\nINVESTIGATION\n{}\n\nFAILING TEST ({})\n```\n{}\n```\n\nFAILURE\n{}",
@@ -663,7 +699,9 @@ async fn review(ctx: &Ctx, issue: &str, passed: &[Candidate]) -> Result<(String,
         .structured(Tier::Reasoner, vec![
             Message::system(
                 "Every candidate patch below makes the reproduction test pass with no new test failures. Choose the one \
-                 a maintainer should merge: correct at the root cause, minimal, idiomatic, least risky for other callers.",
+                 a maintainer should merge: correct at the root cause, minimal, idiomatic, least risky for other callers. \
+                 Strongly prefer local changes over ones that modify global or process-wide state (module-level \
+                 configuration, global contexts, monkey-patching), and over ones that change behavior beyond the bug.",
             ),
             Message::user(format!("BUG REPORT\n{issue}\n\nCANDIDATES\n{candidates}")),
         ], spec)

@@ -273,7 +273,16 @@ fn check_writable(ws: &Workspace, rel: &str) -> Result<(), String> {
 }
 
 /// Replace `old` with `new`, tolerating trailing-whitespace differences when there is no exact match.
+/// A file that ended with a newline keeps it.
 pub fn apply_edit(text: &str, old: &str, new: &str, replace_all: bool) -> Result<String, String> {
+    let mut out = replace(text, old, new, replace_all)?;
+    if text.ends_with('\n') && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+fn replace(text: &str, old: &str, new: &str, replace_all: bool) -> Result<String, String> {
     if old.is_empty() {
         return Err("old_string is empty; use write_file to create files".into());
     }
@@ -435,6 +444,7 @@ mod tests {
         assert!(apply_edit("a\na\n", "a", "b", false).unwrap_err().contains("2 places"));
         assert_eq!(apply_edit("a\na\n", "a", "b", true).unwrap(), "b\nb\n");
         assert!(apply_edit("a\n", "zzz", "b", false).is_err());
+        assert_eq!(apply_edit("x\ny\n", "y\n", "z", false).unwrap(), "x\nz\n");
     }
 
     #[test]
