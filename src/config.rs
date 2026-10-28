@@ -44,6 +44,8 @@ pub struct Config {
     pub reasoner: String,
     pub fix_branches: usize,
     pub test_cmd: Option<String>,
+    /// Cap on reasoning tokens per request; protects against runaway reasoning without limiting normal answers.
+    pub think_budget: Option<u32>,
 }
 
 impl Config {
@@ -66,7 +68,24 @@ impl Config {
             reasoner: var("EMBER_MODEL_REASONER", "nvidia/Nemotron-3-Ultra-550b-a55b"),
             fix_branches: var("EMBER_FIX_BRANCHES", "3").parse().unwrap_or(3).clamp(1, 4),
             test_cmd: env::var("EMBER_TEST_CMD").ok().filter(|v| !v.is_empty()),
+            think_budget: None,
         }
+        .with_budget()
+    }
+
+    /// EMBER_THINK_BUDGET=<tokens> or `off`. Default 4096 on Token Factory (where it is honored), none elsewhere.
+    fn with_budget(mut self) -> Self {
+        self.think_budget = match env::var("EMBER_THINK_BUDGET").ok().as_deref().map(str::trim) {
+            Some("off" | "0" | "none") => None,
+            Some(n) if !n.is_empty() => n.parse().ok(),
+            _ if self.base_url.contains("nebius.com") => Some(4096),
+            _ => None,
+        };
+        self
+    }
+
+    pub fn client(&self) -> crate::llm::Client {
+        crate::llm::Client::new(&self.base_url, self.api_key.clone()).with_think_budget(self.think_budget)
     }
 
     pub fn model(&self, tier: Tier) -> &str {

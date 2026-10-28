@@ -17,6 +17,10 @@ pub struct Message {
     pub tool_calls: Vec<ToolCall>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Nemotron's reasoning for this step. The chat template replays it within the current task and
+    /// drops it from earlier tasks (`truncate_history_thinking`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 impl Message {
@@ -33,7 +37,7 @@ impl Message {
         Message { tool_call_id: Some(id.into()), ..Self::new("tool", content.into()) }
     }
     fn new(role: &str, content: String) -> Self {
-        Message { role: role.into(), content, tool_calls: vec![], tool_call_id: None }
+        Message { role: role.into(), content, tool_calls: vec![], tool_call_id: None, reasoning_content: None }
     }
 }
 
@@ -94,15 +98,18 @@ pub struct Request {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort: Option<&'static str>,
+    pub top_p: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chat_template_kwargs: Option<Value>,
+    /// Hard cap on reasoning tokens (vLLM's `thinking_token_budget`, honored by Token Factory).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_token_budget: Option<u32>,
 }
 
 /// How much a Nemotron model should reason before answering.
 /// Measured on Token Factory: `enable_thinking: false` turns reasoning off on every Nemotron 3 model;
-/// `reasoning_effort: "low"` shortens it on Super (471 → 7 reasoning tokens on a commit message) but
-/// not reliably on Ultra or VL. A `/no_think` system prompt is ignored.
+/// NVIDIA's `low_effort` template switch cuts Super's reasoning sharply (461 → 4 tokens, 4.0s → 2.0s on a
+/// coding question) but not Ultra's or VL's. A `/no_think` system prompt is ignored.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Think {
     /// The model's own default (reasoning on).
@@ -135,7 +142,7 @@ impl Request {
     pub fn think(mut self, think: Think) -> Self {
         match think {
             Think::On => {}
-            Think::Low => self.reasoning_effort = Some("low"),
+            Think::Low => self.chat_template_kwargs = Some(json!({"enable_thinking": true, "low_effort": true})),
             Think::Off => self.chat_template_kwargs = Some(json!({"enable_thinking": false})),
         }
         self
@@ -185,6 +192,8 @@ pub struct Client {
     http: reqwest::Client,
     base_url: String,
     api_key: Option<String>,
+    /// Default cap on reasoning tokens per request (None: no cap).
+    think_budget: Option<u32>,
 }
 
 impl Client {
@@ -196,6 +205,27 @@ impl Client {
                 .expect("http client"),
             base_url: format!("{}/", base_url.trim_end_matches('/')),
             api_key,
+            think_budget: None,
+        }
+    }
+
+    pub fn with_think_budget(mut self, budget: Option<u32>) -> Self {
+        self.think_budget = budget;
+        self
+    }
+
+    /// Apply Nemotron defaults the caller didn't set: NVIDIA's recommended sampling (temperature 1.0,
+    /// top_p 0.95 for all tasks) and the reasoning-token cap. Works on the JSON body so caller-built
+    /// requests (`complete_raw`) get them too.
+    fn tune(&self, body: &mut Value) {
+        let Some(obj) = body.as_object_mut() else { return };
+        if obj.get("model").and_then(Value::as_str).is_some_and(|m| m.to_ascii_lowercase().contains("nemotron")) {
+            obj.entry("temperature").or_insert(json!(1.0));
+            obj.entry("top_p").or_insert(json!(0.95));
+        }
+        let thinking_off = obj.get("chat_template_kwargs").is_some_and(|k| k["enable_thinking"] == json!(false));
+        if let (Some(budget), false) = (self.think_budget, thinking_off) {
+            obj.entry("thinking_token_budget").or_insert(json!(budget));
         }
     }
 
@@ -215,7 +245,8 @@ impl Client {
     }
 
     /// A non-streaming request with a caller-built body (e.g. multimodal content). Returns text and usage.
-    pub async fn complete_raw(&self, body: Value) -> Result<(String, Usage)> {
+    pub async fn complete_raw(&self, mut body: Value) -> Result<(String, Usage)> {
+        self.tune(&mut body);
         let resp = self.auth(self.http.post(format!("{}chat/completions", self.base_url)))?.json(&body).send().await?;
         let status = resp.status();
         let value: Value = resp.json().await?;
@@ -252,6 +283,7 @@ impl Client {
     /// Stream a chat completion; `on_delta` sees visible text and reasoning as it arrives.
     pub async fn stream(&self, req: &Request, mut on_delta: impl FnMut(Delta)) -> Result<Response> {
         let mut body = serde_json::to_value(req)?;
+        self.tune(&mut body);
         body["stream"] = json!(true);
         body["stream_options"] = json!({"include_usage": true});
 
@@ -403,6 +435,20 @@ impl ThinkSplitter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tune_fills_nemotron_defaults_without_overriding() {
+        let client = Client::new("http://localhost", None).with_think_budget(Some(4096));
+        let mut raw = json!({"model": "nvidia/Nemotron-3.5-Super-VL", "temperature": 0.2});
+        client.tune(&mut raw);
+        assert_eq!(raw["temperature"], json!(0.2));
+        assert_eq!(raw["top_p"], json!(0.95));
+        assert_eq!(raw["thinking_token_budget"], json!(4096));
+
+        let mut off = serde_json::to_value(Request { model: "other".into(), ..Default::default() }.think(Think::Off)).unwrap();
+        client.tune(&mut off);
+        assert!(off.get("top_p").is_none() && off.get("thinking_token_budget").is_none());
+    }
 
     fn collect(chunks: &[&str]) -> (String, String) {
         let mut s = ThinkSplitter::default();

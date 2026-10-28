@@ -3,7 +3,8 @@
 These choices come from measuring the models on Token Factory, not from defaults.
 
 - **Reasoning only where it pays.** `enable_thinking: false` turns reasoning off on every Nemotron 3 model, while a
-  `/no_think` system prompt is ignored, and `reasoning_effort: "low"` only shortens it reliably on Super. ember turns
+  `/no_think` system prompt is ignored, and NVIDIA's `low_effort` template switch (used by `--think low`) only
+  shortens it reliably on Super (461 → 4 reasoning tokens, 4.0 s → 2.0 s on a coding question). ember turns
   reasoning off for mechanical drafting (commit messages, branch names, PR text): on a real diff that took commit
   drafts from 2.0–2.6 s to 1.0–1.5 s with 3–4× fewer output tokens and equally good messages. It stays **on**
   where accuracy matters: Nano with thinking off answered "is 91 prime?" wrongly, so the `/fix` judge keeps it, and

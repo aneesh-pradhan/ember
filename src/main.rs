@@ -23,7 +23,6 @@ use clap::Parser;
 
 use crate::agent::{Agent, AgentEvent, Decision, Mode, SharedMode};
 use crate::config::{Config, Tier};
-use crate::llm::Client;
 use crate::tools::Workspace;
 
 /// ember: a terminal coding agent powered by NVIDIA Nemotron on Nebius Token Factory.
@@ -74,7 +73,7 @@ async fn main() -> Result<()> {
 
 /// Non-interactive mode: stream the answer to stdout. Mutating tools are denied unless --yes.
 async fn print_mode(config: Config, cwd: std::path::PathBuf, prompt: String, yes: bool, think: crate::llm::Think) -> Result<()> {
-    let client = Client::new(&config.base_url, config.api_key.clone());
+    let client = config.client();
     let model = Arc::new(Mutex::new(config.coder.clone()));
     let mode = SharedMode::new(if yes { Mode::Auto } else { Mode::Ask });
     let mut agent = Agent::new(client, model, mode, Workspace::new(cwd.clone()));

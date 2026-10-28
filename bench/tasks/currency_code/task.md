@@ -1,0 +1,1 @@
+Add an optional `currency_code` parameter to `format_money`. When it is given (for example "EUR"), format the amount like "1,234.50 EUR" (keeping the minus sign for negatives, e.g. "-3.00 EUR") instead of using the symbol. Existing behavior must not change.
