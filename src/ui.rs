@@ -133,7 +133,7 @@ pub async fn run(
     think: crate::llm::Think,
 ) -> Result<()> {
     let (tx, rx) = mpsc::unbounded_channel();
-    let client = Client::new(&config.base_url, config.api_key.clone());
+    let client = config.client();
     let model = Arc::new(Mutex::new(config.coder.clone()));
     let mode = SharedMode::new(mode);
     let agent = Agent::new(client.clone(), model.clone(), mode.clone(), Workspace::new(cwd.clone()));

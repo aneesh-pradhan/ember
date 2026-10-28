@@ -14,6 +14,8 @@ from. The key is the only required setting for Token Factory.
 | `EMBER_MODEL_FAST` / `EMBER_MODEL_CODER` / `EMBER_MODEL_REASONER` | the models in the [model table](../README.md#how-it-uses-nemotron-on-nebius-token-factory) |
 | `EMBER_FIX_BRANCHES` | `3` (1 to 4) |
 | `EMBER_THINK` | `on`; `low` or `off` for faster, shallower replies (same as `--think` / `/think`) |
+| `EMBER_THINK_BUDGET` | `4096` reasoning tokens per request on Token Factory, no cap elsewhere; a number, or `off` |
+| `EMBER_KEEP_REASONING` | `off`; `1` sends each step's reasoning back to the model for the rest of the task |
 | `EMBER_MOUSE` | `on`; `off` keeps your terminal's normal text selection (no wheel scrolling) |
 | `EMBER_COLORS` | auto; `256` or `truecolor` to override color detection |
 | `EMBER_TEST_CMD` | detected: `cargo test`, `go test ./...`, `pytest`, or `npm test` |

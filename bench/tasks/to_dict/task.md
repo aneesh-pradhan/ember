@@ -1,0 +1,1 @@
+Add `Invoice.to_dict()` that returns a plain dict: `{"items": [...], "subtotal": ..., "discount": ..., "tax": ..., "total": ...}`, where each item is `{"description", "unit_price", "quantity", "amount"}`. The money values should match the existing methods.

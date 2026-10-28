@@ -180,6 +180,8 @@ pub struct Agent {
     title: String,
     last_prompt_tokens: u64,
     checkpoints: Vec<Checkpoint>,
+    /// Send each step's reasoning back to the model within the task (EMBER_KEEP_REASONING=1).
+    keep_reasoning: bool,
 }
 
 impl Agent {
@@ -198,6 +200,7 @@ impl Agent {
             title: String::new(),
             last_prompt_tokens: 0,
             checkpoints: vec![],
+            keep_reasoning: matches!(std::env::var("EMBER_KEEP_REASONING").as_deref(), Ok("1" | "true" | "on")),
         };
         agent.reset();
         agent
@@ -349,7 +352,11 @@ impl Agent {
                 content: resp.content.clone(),
                 thought_secs: (!resp.reasoning.is_empty()).then(|| resp.elapsed.as_secs_f32()),
             });
-            self.messages.push(Message::assistant(resp.content, resp.tool_calls.clone()));
+            let mut reply = Message::assistant(resp.content, resp.tool_calls.clone());
+            if self.keep_reasoning && !resp.reasoning.is_empty() {
+                reply.reasoning_content = Some(resp.reasoning.clone());
+            }
+            self.messages.push(reply);
             if resp.tool_calls.is_empty() {
                 return Ok(());
             }

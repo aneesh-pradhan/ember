@@ -1,0 +1,1 @@
+Invoice totals are a cent short when tax lands on a half cent: a 2.50 item with 5% tax should have tax 0.13 and total 2.63, but we get 0.12 and 2.62. A 50% discount on a 0.25 item should be 0.13, not 0.12. Fix this so half a cent rounds up, without breaking other behavior.
