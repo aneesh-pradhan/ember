@@ -217,6 +217,18 @@ fn walker(root: &Path) -> ignore::Walk {
     WalkBuilder::new(root).hidden(true).git_ignore(true).parents(true).build()
 }
 
+/// Project files relative to `root`, respecting .gitignore (for @-mention completion).
+pub fn project_files(root: &Path, limit: usize) -> Vec<String> {
+    let mut files: Vec<String> = walker(root)
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
+        .map(|e| e.path().strip_prefix(root).unwrap_or(e.path()).to_string_lossy().into_owned())
+        .take(limit)
+        .collect();
+    files.sort();
+    files
+}
+
 fn glob_matches(glob: &str, name: &str) -> bool {
     if glob.is_empty() {
         return true;

@@ -74,6 +74,18 @@ impl Config {
     }
 }
 
+/// Context window size in tokens for a model id (from the Token Factory catalog; conservative default).
+pub fn context_window(model: &str) -> u64 {
+    let m = model.to_ascii_lowercase();
+    if m.contains("ultra") || m.contains("3_5") || m.contains("3.5") {
+        1_000_000
+    } else if m.contains("nemotron-3") {
+        256_000
+    } else {
+        128_000
+    }
+}
+
 pub fn user_env_file() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("ember").join("env"))
 }

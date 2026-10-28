@@ -2,19 +2,76 @@
 
 use std::collections::HashSet;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
+use serde::Deserialize;
+use serde_json::json;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::config::context_window;
 use crate::fix::FixEvent;
-use crate::llm::{Client, Delta, Message, Request, ToolCall};
+use crate::llm::{Client, Delta, Message, Request, ToolCall, ToolSpec};
+use crate::session::{self, Session};
 use crate::tools::{self, Workspace};
 
 const MAX_STEPS: usize = 80;
+/// Compact automatically once the conversation fills this share of the context window.
+const AUTO_COMPACT_AT: f64 = 0.8;
+const COMPACT_ACK: &str = "Got it. I'll continue from that summary.";
 
 pub type Events = mpsc::UnboundedSender<AgentEvent>;
+
+/// How much the agent may do on its own. Cycled with Shift+Tab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    /// Ask before every edit and command.
+    Ask,
+    /// Run edits and commands without asking.
+    Auto,
+    /// Read-only: investigate and propose a plan.
+    Plan,
+}
+
+impl Mode {
+    pub fn next(self) -> Mode {
+        match self {
+            Mode::Ask => Mode::Auto,
+            Mode::Auto => Mode::Plan,
+            Mode::Plan => Mode::Ask,
+        }
+    }
+}
+
+/// The current mode, shared between the UI and a running turn.
+#[derive(Clone)]
+pub struct SharedMode(Arc<AtomicU8>);
+
+impl SharedMode {
+    pub fn new(mode: Mode) -> Self {
+        let shared = SharedMode(Arc::new(AtomicU8::new(0)));
+        shared.set(mode);
+        shared
+    }
+    pub fn get(&self) -> Mode {
+        match self.0.load(Ordering::Relaxed) {
+            1 => Mode::Auto,
+            2 => Mode::Plan,
+            _ => Mode::Ask,
+        }
+    }
+    pub fn set(&self, mode: Mode) {
+        self.0.store(mode as u8, Ordering::Relaxed);
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct Todo {
+    pub content: String,
+    #[serde(default)]
+    pub status: String,
+}
 
 pub enum AgentEvent {
     Text(String),
@@ -25,6 +82,9 @@ pub enum AgentEvent {
     ToolDone { name: String, summary: String, output: String, ok: bool },
     Approval(ApprovalRequest),
     Usage { model: String, prompt: u64, completion: u64 },
+    /// How full the main conversation's context window is.
+    Context { used: u64, window: u64 },
+    Todos(Vec<Todo>),
     Notice(String),
     Fix(FixEvent),
     Error(String),
@@ -35,6 +95,8 @@ pub enum AgentEvent {
 pub struct ApprovalRequest {
     pub summary: String,
     pub preview: Option<String>,
+    /// What "always" would allow (e.g. "`cargo test` commands"), or None if it isn't offered.
+    pub always: Option<String>,
     pub reply: oneshot::Sender<Decision>,
 }
 
@@ -46,33 +108,116 @@ pub enum Decision {
 }
 
 /// Ask the UI to approve an action; dropping the request counts as "no".
-pub async fn ask(tx: &Events, summary: String, preview: Option<String>) -> Decision {
+pub async fn ask(tx: &Events, summary: String, preview: Option<String>, always: Option<String>) -> Decision {
     let (reply, rx) = oneshot::channel();
-    if tx.send(AgentEvent::Approval(ApprovalRequest { summary, preview, reply })).is_err() {
+    if tx.send(AgentEvent::Approval(ApprovalRequest { summary, preview, always, reply })).is_err() {
         return Decision::No;
     }
     rx.await.unwrap_or(Decision::No)
 }
 
+/// The part of a shell command that "always allow" applies to: the program, plus its subcommand
+/// for tools like cargo or git. Commands that chain or redirect are never auto-approved.
+pub fn command_prefix(command: &str) -> Option<String> {
+    if command.contains(['&', ';', '|', '>', '<', '`', '$', '\n']) {
+        return None;
+    }
+    let mut words = command.split_whitespace();
+    let first = words.next()?;
+    match words.next() {
+        Some(second) if !second.starts_with('-') && second.chars().all(|c| c.is_ascii_alphanumeric() || "-_:.".contains(c)) => {
+            Some(format!("{first} {second}"))
+        }
+        _ => Some(first.to_string()),
+    }
+}
+
+fn todo_spec() -> ToolSpec {
+    ToolSpec::new(
+        "update_todos",
+        "Create or update your task list for multi-step work. Send the complete list every time. Keep exactly one \
+         item in_progress while working, and mark items completed as soon as they are done. Skip it for simple \
+         one-step requests.",
+        json!({"type": "object", "properties": {"todos": {"type": "array", "items": {"type": "object", "properties": {
+            "content": {"type": "string", "description": "Short imperative description, e.g. 'Add tests for format_money'"},
+            "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}},
+            "required": ["content", "status"]}}}, "required": ["todos"]}),
+    )
+}
+
 pub struct Agent {
     pub client: Client,
     pub model: Arc<Mutex<String>>,
-    pub auto_approve: Arc<AtomicBool>,
+    pub mode: SharedMode,
     pub ws: Workspace,
     messages: Vec<Message>,
-    always: HashSet<String>,
+    always_tools: HashSet<String>,
+    always_commands: HashSet<String>,
+    session_id: String,
+    title: String,
+    last_prompt_tokens: u64,
 }
 
 impl Agent {
-    pub fn new(client: Client, model: Arc<Mutex<String>>, auto_approve: Arc<AtomicBool>, ws: Workspace) -> Self {
-        let mut agent = Agent { client, model, auto_approve, ws, messages: vec![], always: HashSet::new() };
+    pub fn new(client: Client, model: Arc<Mutex<String>>, mode: SharedMode, ws: Workspace) -> Self {
+        let mut agent = Agent {
+            client,
+            model,
+            mode,
+            ws,
+            messages: vec![],
+            always_tools: HashSet::new(),
+            always_commands: HashSet::new(),
+            session_id: String::new(),
+            title: String::new(),
+            last_prompt_tokens: 0,
+        };
         agent.reset();
         agent
     }
 
     pub fn reset(&mut self) {
         self.messages = vec![Message::system(system_prompt(&self.ws.root))];
-        self.always.clear();
+        self.always_tools.clear();
+        self.always_commands.clear();
+        self.session_id = session::new_id();
+        self.title.clear();
+        self.last_prompt_tokens = 0;
+    }
+
+    /// Continue a saved conversation, with a fresh system prompt for the current state of the repo.
+    pub fn resume(&mut self, saved: Session) -> usize {
+        self.reset();
+        self.session_id = saved.id;
+        self.title = saved.title;
+        self.messages.extend(saved.messages.into_iter().filter(|m| m.role != "system"));
+        self.messages.len() - 1
+    }
+
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    /// The last assistant reply with text, for showing where a resumed session left off.
+    pub fn last_reply(&self) -> Option<String> {
+        self.messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "assistant" && !m.content.trim().is_empty() && m.content != COMPACT_ACK)
+            .map(|m| m.content.clone())
+    }
+
+    fn save(&self) {
+        if self.messages.len() <= 1 {
+            return;
+        }
+        let _ = session::save(&Session {
+            id: self.session_id.clone(),
+            cwd: self.ws.root.display().to_string(),
+            updated: session::now(),
+            title: self.title.clone(),
+            messages: self.messages.clone(),
+        });
     }
 
     /// After a cancelled turn, answer any tool calls left without results so the history stays valid.
@@ -93,15 +238,51 @@ impl Agent {
         }
     }
 
+    /// Record a command the user ran themselves with `!`, so the model can see it.
+    pub fn note_shell(&mut self, command: &str, output: &str) {
+        self.repair();
+        self.messages.push(Message::user(format!(
+            "(I ran this in my shell; no reply needed yet.)\n$ {command}\n```\n{}\n```",
+            tools::truncate(output, 20_000)
+        )));
+        self.save();
+    }
+
     pub async fn turn(&mut self, input: String, tx: &Events) -> Result<()> {
         self.repair();
-        self.messages.push(Message::user(input));
+        let model = self.model.lock().unwrap().clone();
+        if self.last_prompt_tokens as f64 > AUTO_COMPACT_AT * context_window(&model) as f64 {
+            let _ = tx.send(AgentEvent::Notice("Context is nearly full; compacting the conversation first…".into()));
+            self.compact(tx).await?;
+        }
+        if self.title.is_empty() {
+            self.title = tools::one_line(&input, 80);
+        }
+        let plan = self.mode.get() == Mode::Plan;
+        let content = if plan {
+            format!(
+                "{input}\n\n[Plan mode is on: you may only read files and update your task list. Investigate as \
+                 needed, then reply with a concise, numbered implementation plan (files to change, approach, how to \
+                 verify). Do not try to edit files or run commands.]"
+            )
+        } else {
+            input
+        };
+        self.messages.push(Message::user(content));
+        let result = self.run_steps(tx, plan).await;
+        self.save();
+        result
+    }
+
+    async fn run_steps(&mut self, tx: &Events, plan: bool) -> Result<()> {
+        let mut specs = tools::specs(plan);
+        specs.push(todo_spec());
         for _ in 0..MAX_STEPS {
             let model = self.model.lock().unwrap().clone();
             let request = Request {
                 model: model.clone(),
                 messages: self.messages.clone(),
-                tools: tools::specs(false),
+                tools: specs.clone(),
                 max_tokens: Some(8192),
                 ..Default::default()
             };
@@ -114,11 +295,13 @@ impl Agent {
                     });
                 })
                 .await?;
+            self.last_prompt_tokens = resp.usage.prompt_tokens + resp.usage.completion_tokens;
             let _ = tx.send(AgentEvent::Usage {
-                model,
+                model: model.clone(),
                 prompt: resp.usage.prompt_tokens,
                 completion: resp.usage.completion_tokens,
             });
+            let _ = tx.send(AgentEvent::Context { used: self.last_prompt_tokens, window: context_window(&model) });
             let _ = tx.send(AgentEvent::Reply {
                 content: resp.content.clone(),
                 thought_secs: (!resp.reasoning.is_empty()).then(|| resp.elapsed.as_secs_f32()),
@@ -128,7 +311,7 @@ impl Agent {
                 return Ok(());
             }
             for call in &resp.tool_calls {
-                let result = self.execute(call, tx).await;
+                let result = self.execute(call, tx, plan).await;
                 self.messages.push(Message::tool(call.id.clone(), result));
             }
         }
@@ -136,15 +319,43 @@ impl Agent {
         Ok(())
     }
 
-    async fn execute(&mut self, call: &ToolCall, tx: &Events) -> String {
+    async fn execute(&mut self, call: &ToolCall, tx: &Events, plan: bool) -> String {
         let name = call.function.name.as_str();
         let args = call.args();
+
+        if name == "update_todos" {
+            return match serde_json::from_value::<Vec<Todo>>(args["todos"].clone()) {
+                Ok(todos) => {
+                    let _ = tx.send(AgentEvent::Todos(todos));
+                    "Task list updated.".into()
+                }
+                Err(e) => format!("Error: invalid todos: {e}"),
+            };
+        }
+        if plan && tools::mutates(name) {
+            return "Plan mode is on, so this action is not available. Finish your plan instead.".into();
+        }
+
         let summary = tools::summary(name, &args);
-        if tools::mutates(name) && !self.auto_approve.load(Ordering::Relaxed) && !self.always.contains(name) {
-            match ask(tx, summary.clone(), tools::preview(&self.ws, name, &args)).await {
+        let command = args["command"].as_str().unwrap_or("");
+        let prefix = (name == "bash").then(|| command_prefix(command)).flatten();
+        let pre_approved = match &prefix {
+            Some(p) => self.always_commands.contains(p),
+            None => name != "bash" && self.always_tools.contains(name),
+        };
+        if tools::mutates(name) && self.mode.get() != Mode::Auto && !pre_approved {
+            let always = match name {
+                "bash" => prefix.as_ref().map(|p| format!("`{p}` commands")),
+                _ => Some("file edits".to_string()),
+            };
+            match ask(tx, summary.clone(), tools::preview(&self.ws, name, &args), always).await {
                 Decision::Yes => {}
                 Decision::Always => {
-                    self.always.insert(name.to_string());
+                    if let Some(p) = prefix {
+                        self.always_commands.insert(p);
+                    } else if name != "bash" {
+                        self.always_tools.extend(["edit_file".to_string(), "write_file".to_string()]);
+                    }
                 }
                 Decision::No => {
                     let _ = tx.send(AgentEvent::ToolDone {
@@ -165,6 +376,63 @@ impl Agent {
         let _ = tx.send(AgentEvent::ToolDone { name: name.into(), summary, output: output.clone(), ok });
         debug_log(name, &args, &output);
         output
+    }
+
+    /// Replace the conversation so far with a summary, to free up context.
+    pub async fn compact(&mut self, tx: &Events) -> Result<()> {
+        self.repair();
+        let history = &self.messages[1..];
+        if history.len() < 2 {
+            let _ = tx.send(AgentEvent::Notice("Nothing to compact yet.".into()));
+            return Ok(());
+        }
+        let mut transcript = String::new();
+        for m in history {
+            let body = match m.role.as_str() {
+                "tool" => tools::truncate(&m.content, 1500),
+                _ => m.content.clone(),
+            };
+            transcript.push_str(&format!("[{}] {body}\n", m.role));
+            for call in &m.tool_calls {
+                transcript.push_str(&format!("[tool call] {} {}\n", call.function.name, tools::one_line(&call.function.arguments, 300)));
+            }
+        }
+        let transcript = crate::fix::tail(&transcript, 200_000);
+        let model = self.model.lock().unwrap().clone();
+        let resp = self
+            .client
+            .stream(
+                &Request {
+                    model: model.clone(),
+                    messages: vec![
+                        Message::system(
+                            "Summarize this coding session so it can be continued without the full history. Include: the \
+                             user's goals and requests, decisions made, files read or changed and their current state, \
+                             commands run and their results, and anything still unfinished. Be specific with paths, \
+                             names and commands. Use concise Markdown.",
+                        ),
+                        Message::user(transcript),
+                    ],
+                    max_tokens: Some(4096),
+                    ..Default::default()
+                },
+                |_| {},
+            )
+            .await?;
+        let _ = tx.send(AgentEvent::Usage { model, prompt: resp.usage.prompt_tokens, completion: resp.usage.completion_tokens });
+        let count = history.len();
+        self.messages.truncate(1);
+        self.messages.push(Message::user(format!(
+            "(Earlier conversation was compacted to save context. Summary:)\n\n{}",
+            resp.content
+        )));
+        self.messages.push(Message::assistant(COMPACT_ACK, vec![]));
+        self.last_prompt_tokens = 0;
+        self.save();
+        let window = context_window(&self.model.lock().unwrap());
+        let _ = tx.send(AgentEvent::Context { used: 0, window });
+        let _ = tx.send(AgentEvent::Notice(format!("Compacted {count} messages into a summary.")));
+        Ok(())
     }
 }
 
@@ -196,10 +464,12 @@ pub fn system_prompt(root: &Path) -> String {
          # How to work\n\
          - Explore before you change anything: use list_files, grep and read_file to find the relevant code. \
            Never guess file contents or paths.\n\
+         - For tasks with three or more steps, keep a task list with update_todos and update it as you go.\n\
          - Make focused changes with edit_file, matching the existing style. Use write_file only for new files.\n\
          - After changing code, build or run the relevant tests with bash and fix what you broke.\n\
          - Mutating actions ask the user for approval. If they decline, stop and ask how to proceed.\n\
-         - Do not commit, push, or delete files unless asked.\n\n\
+         - Do not commit, push, or delete files unless asked.\n\
+         - Files the user mentions with @path are attached to their message.\n\n\
          # How to communicate\n\
          - Be concise and direct. Use Markdown; put code, commands and paths in backticks.\n\
          - When you finish a task, briefly say what you changed and how you verified it, including anything \
@@ -218,5 +488,19 @@ fn debug_log(name: &str, args: &serde_json::Value, output: &str) {
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
         use std::io::Write;
         let _ = writeln!(f, "{entry}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_prefixes() {
+        assert_eq!(command_prefix("cargo test --quiet").as_deref(), Some("cargo test"));
+        assert_eq!(command_prefix("ls -la").as_deref(), Some("ls"));
+        assert_eq!(command_prefix("uvx pytest -q").as_deref(), Some("uvx pytest"));
+        assert_eq!(command_prefix("cargo test && rm -rf /"), None);
+        assert_eq!(command_prefix("cat x > y"), None);
     }
 }

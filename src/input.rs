@@ -90,6 +90,26 @@ impl Input {
         self.cursor = start;
     }
 
+    /// The whitespace-delimited word ending at the cursor, with its byte range.
+    pub fn current_word(&self) -> (usize, &str) {
+        let before = &self.text[..self.cursor];
+        let start = before.rfind(char::is_whitespace).map_or(0, |i| i + before[i..].chars().next().map_or(1, char::len_utf8));
+        (start, &self.text[start..self.cursor])
+    }
+
+    /// Replace `text[start..cursor]` with `with`, leaving the cursor after it.
+    pub fn replace_before_cursor(&mut self, start: usize, with: &str) {
+        self.text.replace_range(start..self.cursor, with);
+        self.cursor = start + with.len();
+        self.browsing = None;
+    }
+
+    pub fn set(&mut self, text: &str) {
+        self.text = text.to_string();
+        self.cursor = self.text.len();
+        self.browsing = None;
+    }
+
     pub fn is_multiline(&self) -> bool {
         self.text.contains('\n')
     }
@@ -160,5 +180,10 @@ mod tests {
         assert_eq!(i.text(), "héllXo");
         i.history_next();
         assert_eq!(i.text(), "draft");
+        i.clear();
+        i.insert("look at @src/ma");
+        assert_eq!(i.current_word(), (8, "@src/ma"));
+        i.replace_before_cursor(8, "@src/main.rs ");
+        assert_eq!(i.text(), "look at @src/main.rs ");
     }
 }

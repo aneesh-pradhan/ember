@@ -184,12 +184,7 @@ pub fn wrap(lines: &[Line<'static>], width: u16) -> Vec<Line<'static>> {
             out.push(line.clone());
             continue;
         }
-        let indent: usize = line
-            .spans
-            .first()
-            .map(|s| s.content.len() - s.content.trim_start().len())
-            .unwrap_or(0)
-            .min(width / 2);
+        let indent = hanging_indent(line).min(width / 2);
         let mut current: Vec<Span<'static>> = Vec::new();
         let mut used = 0;
         for span in &line.spans {
@@ -226,6 +221,24 @@ pub fn wrap(lines: &[Line<'static>], width: u16) -> Vec<Line<'static>> {
         }
     }
     out
+}
+
+/// Width of a line's leading gutter (indentation, bullets, list numbers, code bars), so wrapped
+/// continuation lines line up under the text instead of the margin.
+fn hanging_indent(line: &Line) -> usize {
+    let mut width = 0;
+    for span in &line.spans {
+        let text = span.content.as_ref();
+        let t = text.trim();
+        let numbered = t.len() > 1 && t.ends_with('.') && t[..t.len() - 1].chars().all(|c| c.is_ascii_digit());
+        if t.is_empty() || numbered || matches!(t, "•" | "●" | "│" | "-" | "*" | "›" | "▸" | "○" | "✓") {
+            width += text.width();
+        } else {
+            width += text.len() - text.trim_start().len();
+            break;
+        }
+    }
+    width
 }
 
 fn split_keep_spaces(s: &str) -> Vec<&str> {
@@ -278,5 +291,7 @@ mod tests {
     fn wraps_words_with_indent() {
         let lines = wrap(&[Line::from("  alpha beta gamma delta")], 14);
         assert_eq!(text(&lines), vec!["  alpha beta ", "  gamma delta"]);
+        let item = Line::from(vec![Span::raw("● "), Span::raw("• "), Span::raw("one two three four")]);
+        assert_eq!(text(&wrap(&[item], 14)), vec!["● • one two ", "    three four"]);
     }
 }

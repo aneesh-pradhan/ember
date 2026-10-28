@@ -73,23 +73,44 @@ printf 'NEBIUS_API_KEY=%s\n' 'your-key' > ~/.config/ember/env && chmod 600 ~/.co
 
 ```bash
 cd your-project
-ember                         # interactive session
+ember                              # interactive session
 ember "why does the build fail?"   # start with a prompt
-ember -p "summarize src/" # print mode: answer and exit (edits/commands denied unless --yes)
-ember --model ultra           # pick the model tier
+ember -c                           # continue the last conversation in this directory
+ember --plan                       # start in plan mode
+ember -p "summarize src/"          # print mode: answer and exit (edits/commands denied unless --yes)
+ember --model ultra                # pick the model tier
 ```
+
+### In the prompt
+
+| Input | |
+|---|---|
+| `/` | Command menu: type to filter, ↑/↓ to choose, Tab or Enter to complete |
+| `@path` | Attach a file to your message; a fuzzy file picker pops up as you type |
+| `!command` | Run a shell command yourself; its output joins the conversation |
+| Shift+Tab | Cycle modes: **ask** before edits → **auto-accept** → **plan** (read-only, ends in a plan) |
+| Esc | Interrupt ember (or clear the input) |
+| Ctrl+T | Show the task list |
+| Alt+Enter / Ctrl+J | New line |
+
+For multi-step work ember keeps a live **task list**, and the status bar shows how full the **context window**
+is. Near the limit ember compacts the conversation automatically. When a command needs approval, "always" applies
+to that command family (e.g. all `cargo test` runs), never to arbitrary shell. Conversations are saved
+automatically, so you can pick them up later.
+
+### Commands
 
 | Command | |
 |---|---|
 | `/fix <bug or GitHub issue URL>` | Reproduce with a failing test, fix in parallel worktrees, verify, apply on approval |
-| `/model [nano\|super\|ultra\|id]` | Show or switch the model |
-| `/models` | List Nemotron models available to your key |
-| `/auto` or Shift+Tab | Toggle auto-approve for edits and commands |
-| `/usage` | Token usage per model this session |
-| `/clear` | Start a new conversation |
-| `/quit` | Exit (or Ctrl+C twice) |
-
-Keys: Enter sends, Alt+Enter or Ctrl+J inserts a newline, Esc interrupts, ↑/↓ browse history.
+| `/init` | Explore the repo and write an `AGENTS.md` for future sessions |
+| `/plan`, `/auto` | Toggle plan mode / auto-accept |
+| `/model [nano\|super\|ultra\|id]` | Show or switch the model; `/models` lists those on your key |
+| `/resume [n]` | List saved conversations in this directory, or continue one |
+| `/compact` | Summarize the conversation so far to free up context |
+| `/diff` | Show uncommitted changes |
+| `/todos`, `/usage` | Task list; token usage per model |
+| `/clear`, `/quit` | New conversation; exit (or Ctrl+C twice) |
 
 ember reads project instructions from `AGENTS.md` or `EMBER.md` in the working directory.
 
@@ -118,7 +139,9 @@ EMBER_TEST_CMD="uvx pytest -q" ember
 ```
 src/
   main.rs      CLI (interactive, print mode)
-  ui.rs        Ratatui inline-viewport TUI: scrollback transcript, live area, approvals, /fix progress
+  ui.rs        Ratatui inline-viewport TUI: scrollback transcript, live area, popups, approvals, /fix progress
+  session.rs   saved conversations for /resume and --continue
+  logo.rs      the pocket-rig mascot
   agent.rs     agent loop: stream → tool calls → approval → results → repeat; cancellation-safe history
   fix.rs       /fix pipeline over git worktrees
   llm.rs       streaming OpenAI-compatible client: SSE, tool-call assembly, <think> splitting, retries

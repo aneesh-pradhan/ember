@@ -212,7 +212,7 @@ pub async fn run(client: Client, config: Config, cwd: PathBuf, input: String, au
 
     if !auto {
         let summary = format!("Let /fix run `{test_cmd}` and model-written tests in temporary git worktrees");
-        if ask(&ctx.tx, summary, None).await == Decision::No {
+        if ask(&ctx.tx, summary, None, None).await == Decision::No {
             bail!("cancelled");
         }
     }
@@ -290,7 +290,7 @@ pub async fn run(client: Client, config: Config, cwd: PathBuf, input: String, au
         diff: chosen.diff.clone(),
     });
 
-    if ask(&ctx.tx, "Apply this patch to your working tree".into(), None).await != Decision::No {
+    if ask(&ctx.tx, "Apply this patch to your working tree".into(), None, None).await != Decision::No {
         let patch_file = trees.dir.join("winner.patch");
         std::fs::write(&patch_file, &chosen.diff)?;
         git(&top, &["apply", "--whitespace=nowarn", patch_file.to_str().unwrap()])?;

@@ -5,18 +5,18 @@ mod input;
 mod llm;
 mod logo;
 mod markdown;
+mod session;
 mod theme;
 mod tools;
 mod ui;
 
 use std::io::Write;
-use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use clap::Parser;
 
-use crate::agent::{Agent, AgentEvent, Decision};
+use crate::agent::{Agent, AgentEvent, Decision, Mode, SharedMode};
 use crate::config::{Config, Tier};
 use crate::llm::Client;
 use crate::tools::Workspace;
@@ -36,6 +36,12 @@ struct Cli {
     /// Run edits and commands without asking.
     #[arg(long)]
     yes: bool,
+    /// Start in plan mode (read-only investigation that ends in a plan).
+    #[arg(long, conflicts_with = "yes")]
+    plan: bool,
+    /// Continue the most recent conversation in this directory.
+    #[arg(short = 'c', long = "continue")]
+    resume: bool,
 }
 
 #[tokio::main]
@@ -50,14 +56,16 @@ async fn main() -> Result<()> {
         let prompt = cli.prompt.unwrap_or_default();
         return print_mode(config, cwd, prompt, cli.yes).await;
     }
-    ui::run(config, cwd, cli.yes, cli.prompt).await
+    let mode = if cli.yes { Mode::Auto } else if cli.plan { Mode::Plan } else { Mode::Ask };
+    ui::run(config, cwd, mode, cli.prompt, cli.resume).await
 }
 
 /// Non-interactive mode: stream the answer to stdout. Mutating tools are denied unless --yes.
 async fn print_mode(config: Config, cwd: std::path::PathBuf, prompt: String, yes: bool) -> Result<()> {
     let client = Client::new(&config.base_url, config.api_key.clone());
     let model = Arc::new(Mutex::new(config.coder.clone()));
-    let mut agent = Agent::new(client, model, Arc::new(AtomicBool::new(yes)), Workspace::new(cwd));
+    let mode = SharedMode::new(if yes { Mode::Auto } else { Mode::Ask });
+    let mut agent = Agent::new(client, model, mode, Workspace::new(cwd));
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let turn = tokio::spawn(async move { agent.turn(prompt, &tx).await });
     let mut out = std::io::stdout();
