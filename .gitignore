@@ -1,7 +1,2 @@
-.venv/
-__pycache__/
-*.pyc
+/target
 .env
-runs/
-.pytest_cache/
-dist/
