@@ -72,6 +72,7 @@ impl Ctx {
             model,
             prompt: resp.usage.prompt_tokens,
             completion: resp.usage.completion_tokens,
+            cached: resp.usage.cached_tokens,
         });
         Ok(resp)
     }

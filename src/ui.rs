@@ -51,6 +51,7 @@ const COMMANDS: &[(&str, &str, bool)] = &[
     ("clear", "start a new conversation", false),
     ("diff", "show uncommitted changes (git diff)", false),
     ("todos", "show the current task list", false),
+    ("think", "set Nemotron's reasoning for the agent: on, low or off", true),
     ("mcp", "show connected MCP servers and their tools", false),
     ("usage", "token usage per model this session", false),
     ("help", "show commands and keys", false),
@@ -86,7 +87,8 @@ pub struct App {
     popup_token: String,
     /// Suggestions closed with Esc stay closed until the token being completed changes.
     popup_dismissed: bool,
-    usage: BTreeMap<String, (u64, u64)>,
+    /// Per model: prompt tokens, completion tokens, cached prompt tokens.
+    usage: BTreeMap<String, (u64, u64, u64)>,
     /// Everything printed so far, unwrapped.
     transcript: Vec<Line<'static>>,
     /// `transcript` wrapped to `wrap_width`, extended incrementally.
@@ -122,12 +124,20 @@ struct Popup {
     items: Vec<(String, String)>,
 }
 
-pub async fn run(config: Config, cwd: PathBuf, mode: Mode, initial: Option<String>, resume_last: bool) -> Result<()> {
+pub async fn run(
+    config: Config,
+    cwd: PathBuf,
+    mode: Mode,
+    initial: Option<String>,
+    resume_last: bool,
+    think: crate::llm::Think,
+) -> Result<()> {
     let (tx, rx) = mpsc::unbounded_channel();
     let client = Client::new(&config.base_url, config.api_key.clone());
     let model = Arc::new(Mutex::new(config.coder.clone()));
     let mode = SharedMode::new(mode);
     let agent = Agent::new(client.clone(), model.clone(), mode.clone(), Workspace::new(cwd.clone()));
+    *agent.think.lock().unwrap() = think;
     let (mcp, mcp_cwd) = (agent.mcp.clone(), cwd.clone());
     tokio::spawn(async move { mcp.start(&mcp_cwd).await });
     let mut app = App {
@@ -347,10 +357,11 @@ impl App {
                 self.approval_sel = 0;
                 self.live_tool = None;
             }
-            AgentEvent::Usage { model, prompt, completion } => {
+            AgentEvent::Usage { model, prompt, completion, cached } => {
                 let entry = self.usage.entry(model).or_default();
                 entry.0 += prompt;
                 entry.1 += completion;
+                entry.2 += cached;
             }
             AgentEvent::Context { used, window } => self.context = Some((used, window)),
             AgentEvent::Todos(todos) => {
@@ -758,6 +769,29 @@ impl App {
             "auto" => self.set_mode(if self.mode.get() == Mode::Auto { Mode::Ask } else { Mode::Auto }),
             "plan" => self.set_mode(if self.mode.get() == Mode::Plan { Mode::Ask } else { Mode::Plan }),
             "model" => self.set_model(arg),
+            "think" => {
+                let agent = self.agent.clone();
+                let Ok(agent) = agent.try_lock() else {
+                    self.print_notice("ember is busy; try /think again when it's idle");
+                    return;
+                };
+                let current = *agent.think.lock().unwrap();
+                match crate::llm::Think::parse(arg) {
+                    Some(level) => {
+                        *agent.think.lock().unwrap() = level;
+                        drop(agent);
+                        self.print_notice(match level {
+                            crate::llm::Think::On => "Reasoning on: Nemotron thinks before acting (best for hard tasks)",
+                            crate::llm::Think::Low => "Reasoning low: shorter thinking, faster replies",
+                            crate::llm::Think::Off => "Reasoning off: fastest; best for simple, mechanical requests",
+                        });
+                    }
+                    None => {
+                        drop(agent);
+                        self.print_notice(format!("Reasoning is {}. Use /think on, /think low or /think off.", current.label()));
+                    }
+                }
+            }
             "usage" | "cost" => self.print_usage(),
             "todos" => self.print_todos(),
             "diff" => self.print_git_diff(),
@@ -1072,11 +1106,15 @@ impl App {
             self.print_notice("No model calls yet");
             return;
         }
-        let rows: Vec<Line<'static>> = self
-            .usage
-            .iter()
-            .map(|(model, (p, c))| Line::styled(format!("  {model:<45} {p:>9} in {c:>8} out"), theme::dim()))
-            .collect();
+        let mut rows = vec![Line::styled(format!("  {:<42} {:>9} {:>8} {:>9}", "model", "input", "cached", "output"), theme::bold())];
+        for (model, (p, c, cached)) in &self.usage {
+            let pct = if *p > 0 { format!("{}%", cached * 100 / p) } else { "-".into() };
+            rows.push(Line::styled(format!("  {model:<42} {p:>9} {pct:>8} {c:>9}"), theme::dim()));
+        }
+        rows.push(Line::styled(
+            "  Cached input is served from Token Factory's prompt cache at a lower price.",
+            theme::dim(),
+        ));
         self.print(rows);
     }
 
@@ -1254,9 +1292,15 @@ impl App {
             let style = if pct >= 80 { theme::err() } else if pct >= 50 { theme::code() } else { theme::dim() };
             right.push(Span::styled(format!("ctx {pct}%  "), style));
         }
-        let tokens: u64 = self.usage.values().map(|(p, c)| p + c).sum();
+        let tokens: u64 = self.usage.values().map(|(p, c, _)| p + c).sum();
         if tokens > 0 {
             right.push(Span::styled(format!("{:.1}k tok  ", tokens as f64 / 1000.0), theme::dim()));
+        }
+        if let Ok(agent) = self.agent.try_lock() {
+            let think = *agent.think.lock().unwrap();
+            if think != crate::llm::Think::On {
+                right.push(Span::styled(format!("think {}  ", think.label()), theme::code()));
+            }
         }
         right.push(Span::styled(tier.map_or("custom", |t| t.label()).to_string(), tier.map_or(theme::bold(), theme::tier)));
         right.push(Span::styled(format!(" {} ", model.rsplit('/').next().unwrap_or("")), theme::dim()));

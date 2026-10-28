@@ -12,7 +12,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::config::{context_window, vision_model};
 use crate::fix::FixEvent;
-use crate::llm::{Client, Delta, Message, Request, ToolCall, ToolSpec};
+use crate::llm::{Client, Delta, Message, Request, Think, ToolCall, ToolSpec};
 use crate::mcp::Mcp;
 use crate::session::{self, Session};
 use crate::tools::{self, Workspace};
@@ -82,7 +82,7 @@ pub enum AgentEvent {
     ToolStart { summary: String },
     ToolDone { name: String, summary: String, output: String, ok: bool },
     Approval(ApprovalRequest),
-    Usage { model: String, prompt: u64, completion: u64 },
+    Usage { model: String, prompt: u64, completion: u64, cached: u64 },
     /// How full the main conversation's context window is.
     Context { used: u64, window: u64 },
     Todos(Vec<Todo>),
@@ -169,6 +169,8 @@ pub struct Agent {
     /// Tools from MCP servers; filled in the background after startup.
     pub mcp: Arc<Mcp>,
     pub model: Arc<Mutex<String>>,
+    /// Reasoning level for the interactive agent (/think).
+    pub think: Arc<Mutex<Think>>,
     pub mode: SharedMode,
     pub ws: Workspace,
     messages: Vec<Message>,
@@ -186,6 +188,7 @@ impl Agent {
             client,
             mcp: Arc::new(Mcp::default()),
             model,
+            think: Arc::new(Mutex::new(Think::On)),
             mode,
             ws,
             messages: vec![],
@@ -306,22 +309,25 @@ impl Agent {
     }
 
     async fn run_steps(&mut self, tx: &Events, plan: bool) -> Result<()> {
-        let mut base = tools::specs(plan);
-        base.push(todo_spec());
-        base.push(view_image_spec());
+        // The tool list is fixed for the whole turn: changing it mid-turn would change the prompt prefix
+        // and miss Token Factory's prompt cache. MCP servers that finish starting later join next turn.
+        let mut specs = tools::specs(plan);
+        specs.push(todo_spec());
+        specs.push(view_image_spec());
+        if !plan {
+            specs.extend(self.mcp.specs());
+        }
         for _ in 0..MAX_STEPS {
-            let mut specs = base.clone();
-            if !plan {
-                specs.extend(self.mcp.specs()); // servers may finish starting mid-conversation
-            }
             let model = self.model.lock().unwrap().clone();
+            let think = *self.think.lock().unwrap();
             let request = Request {
                 model: model.clone(),
                 messages: self.messages.clone(),
                 tools: specs.clone(),
                 max_tokens: Some(8192),
                 ..Default::default()
-            };
+            }
+            .think(think);
             let resp = self
                 .client
                 .stream(&request, |delta| {
@@ -336,6 +342,7 @@ impl Agent {
                 model: model.clone(),
                 prompt: resp.usage.prompt_tokens,
                 completion: resp.usage.completion_tokens,
+                cached: resp.usage.cached_tokens,
             });
             let _ = tx.send(AgentEvent::Context { used: self.last_prompt_tokens, window: context_window(&model) });
             let _ = tx.send(AgentEvent::Reply {
@@ -501,7 +508,7 @@ impl Agent {
     async fn look_at(&self, path: &Path, request: &str, tx: &Events) -> Result<String> {
         let model = vision_model();
         let (text, usage) = crate::vision::describe(&self.client, &model, path, request).await?;
-        let _ = tx.send(AgentEvent::Usage { model, prompt: usage.prompt_tokens, completion: usage.completion_tokens });
+        let _ = tx.send(AgentEvent::Usage { model, prompt: usage.prompt_tokens, completion: usage.completion_tokens, cached: usage.cached_tokens });
         Ok(text)
     }
 
@@ -552,7 +559,7 @@ impl Agent {
                 },
             )
             .await?;
-        let _ = tx.send(AgentEvent::Usage { model: model.into(), prompt: resp.usage.prompt_tokens, completion: resp.usage.completion_tokens });
+        let _ = tx.send(AgentEvent::Usage { model: model.into(), prompt: resp.usage.prompt_tokens, completion: resp.usage.completion_tokens, cached: resp.usage.cached_tokens });
         let _ = tx.send(AgentEvent::Reply { content: resp.content.clone(), thought_secs: None });
         self.messages.push(Message::assistant(resp.content, vec![]));
         self.save();
@@ -596,11 +603,12 @@ impl Agent {
                     ],
                     max_tokens: Some(4096),
                     ..Default::default()
-                },
+                }
+                .think(Think::Low),
                 |_| {},
             )
             .await?;
-        let _ = tx.send(AgentEvent::Usage { model, prompt: resp.usage.prompt_tokens, completion: resp.usage.completion_tokens });
+        let _ = tx.send(AgentEvent::Usage { model, prompt: resp.usage.prompt_tokens, completion: resp.usage.completion_tokens, cached: resp.usage.cached_tokens });
         let count = history.len();
         self.messages.truncate(1);
         self.messages.push(Message::user(format!(
@@ -645,6 +653,8 @@ pub fn system_prompt(root: &Path) -> String {
          # How to work\n\
          - Explore before you change anything: use list_files, grep and read_file to find the relevant code. \
            Never guess file contents or paths.\n\
+         - You make one tool call per reply, so batch: read every file you need in a single read_file call with \
+           `paths`, and combine related searches into one grep pattern with `|`.\n\
          - For tasks with three or more steps, keep a task list with update_todos and update it as you go.\n\
          - Make focused changes with edit_file, matching the existing style. Use write_file only for new files.\n\
          - After changing code, build or run the relevant tests with bash and fix what you broke.\n\

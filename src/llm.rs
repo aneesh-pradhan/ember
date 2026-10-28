@@ -93,6 +93,53 @@ pub struct Request {
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chat_template_kwargs: Option<Value>,
+}
+
+/// How much a Nemotron model should reason before answering.
+/// Measured on Token Factory: `enable_thinking: false` turns reasoning off on every Nemotron 3 model;
+/// `reasoning_effort: "low"` shortens it on Super (471 → 7 reasoning tokens on a commit message) but
+/// not reliably on Ultra or VL. A `/no_think` system prompt is ignored.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Think {
+    /// The model's own default (reasoning on).
+    #[default]
+    On,
+    Low,
+    Off,
+}
+
+impl Think {
+    pub fn parse(s: &str) -> Option<Think> {
+        match s.to_ascii_lowercase().as_str() {
+            "on" | "default" | "high" => Some(Think::On),
+            "low" => Some(Think::Low),
+            "off" | "none" => Some(Think::Off),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Think::On => "on",
+            Think::Low => "low",
+            Think::Off => "off",
+        }
+    }
+}
+
+impl Request {
+    pub fn think(mut self, think: Think) -> Self {
+        match think {
+            Think::On => {}
+            Think::Low => self.reasoning_effort = Some("low"),
+            Think::Off => self.chat_template_kwargs = Some(json!({"enable_thinking": false})),
+        }
+        self
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
@@ -101,6 +148,21 @@ pub struct Usage {
     pub prompt_tokens: u64,
     #[serde(default)]
     pub completion_tokens: u64,
+    /// Prompt tokens served from Token Factory's prefix cache (billed at a lower rate).
+    #[serde(default)]
+    pub cached_tokens: u64,
+}
+
+impl Usage {
+    /// Parse a `usage` object, picking up cached tokens from either field the API uses.
+    pub fn from_json(v: &Value) -> Usage {
+        let n = |v: &Value| v.as_u64().unwrap_or(0);
+        Usage {
+            prompt_tokens: n(&v["prompt_tokens"]),
+            completion_tokens: n(&v["completion_tokens"]),
+            cached_tokens: n(&v["prompt_cache_hit_tokens"]).max(n(&v["prompt_tokens_details"]["cached_tokens"])),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -172,7 +234,7 @@ impl Client {
         if visible {
             text.push_str(&rest);
         }
-        let usage = serde_json::from_value(value["usage"].clone()).unwrap_or_default();
+        let usage = Usage::from_json(&value["usage"]);
         Ok((text.trim().to_string(), usage))
     }
 
@@ -244,10 +306,8 @@ impl Client {
                     break 'outer;
                 }
                 let Ok(v) = serde_json::from_str::<Value>(data) else { continue };
-                if let Ok(usage) = serde_json::from_value::<Usage>(v["usage"].clone()) {
-                    if !v["usage"].is_null() {
-                        out.usage = usage;
-                    }
+                if v["usage"].is_object() {
+                    out.usage = Usage::from_json(&v["usage"]);
                 }
                 let Some(choices) = v["choices"].as_array() else { continue };
                 for choice in choices {

@@ -42,8 +42,30 @@ ember routes each kind of work to the smallest Nemotron model that does it well:
 | **Ultra** | `nvidia/Nemotron-3-Ultra-550b-a55b` | `/fix` strategy planning and choosing between passing candidates; `/review` |
 | **Super VL** | `nvidia/Nemotron-3.5-Super-VL` | ember's eyes: reads screenshots and diagrams you attach, and images the agent opens with `view_image` |
 
-Switch the interactive model at any time with `/model nano|super|ultra` (or any model id from `/models`).
+Switch the interactive model at any time with `/model nano|super|ultra` (or any model id from `/models`), and its
+reasoning with `/think on|low|off` (or `--think`).
 Nemotron's reasoning is streamed live in the UI (from `reasoning_content` or inline `<think>` blocks) and kept out of the transcript.
+
+### Tuned for Nemotron on Token Factory
+
+These choices come from measuring the models on Token Factory, not from defaults:
+
+- **Reasoning only where it pays.** `enable_thinking: false` turns reasoning off on every Nemotron 3 model, while a
+  `/no_think` system prompt is ignored, and `reasoning_effort: "low"` only shortens it reliably on Super. ember turns
+  reasoning off for mechanical drafting (commit messages, branch names, PR text): on a real diff that took commit
+  drafts from 2.0–2.6 s to 1.0–1.5 s with 3–4× fewer output tokens and equally good messages. It stays **on**
+  where accuracy matters: Nano with thinking off answered "is 91 prime?" wrongly, so the `/fix` judge keeps it, and
+  Super VL describes screenshots just as accurately either way, so it keeps its default too. For the interactive
+  agent, on, low and off all took about 4–6 s on an exploration task (time goes to round trips, not thinking), and
+  `off` started narrating its steps into the answer, so the default is `on`.
+- **Batched reads.** Nemotron Super makes one tool call per reply, even with `parallel_tool_calls` and an explicit
+  hint, so every extra file costs a round trip that resends the conversation. `read_file` accepts a list of `paths`
+  and the prompt tells the model to batch; in testing it read related files together and grounded answers in
+  more of the code at the same cost.
+- **Prompt-cache friendly.** Token Factory caches repeated prompt prefixes (4,512 of 4,533 tokens on a repeat
+  request), billed at a lower rate. ember keeps the system prompt and the tool list fixed for each turn, so the
+  growing conversation is re-sent as a stable prefix, and `/usage` shows how much input came from the cache
+  (up to 99% on warm runs).
 
 ## Install
 
@@ -114,7 +136,7 @@ and run `cargo install --git https://github.com/aneesh-pradhan/ember`.
 
 - The installer downloads the matching binary from [Releases](https://github.com/aneesh-pradhan/ember/releases),
   verifies its SHA-256 checksum, and installs it to `~/.local/bin`.
-- `EMBER_INSTALL_DIR=/some/dir` installs elsewhere; `EMBER_VERSION=v0.4.0` pins a version.
+- `EMBER_INSTALL_DIR=/some/dir` installs elsewhere; `EMBER_VERSION=v0.5.0` pins a version.
 - **Update:** run the same one-liner again. **Uninstall:** `rm ~/.local/bin/ember`.
 - The key can also live in a `.env` file in the project you run ember from. Saved conversations are stored in
   `~/.local/share/ember` on Linux and `~/Library/Application Support/ember` on macOS.
@@ -167,10 +189,11 @@ automatically, so you can pick them up later.
 | `/init` | Explore the repo and write an `AGENTS.md` for future sessions |
 | `/plan`, `/auto` | Toggle plan mode / auto-accept |
 | `/model [nano\|super\|ultra\|id]` | Show or switch the model; `/models` lists those on your key |
+| `/think [on\|low\|off]` | Set how much Nemotron reasons before acting |
 | `/resume [n]` | List saved conversations in this directory, or continue one |
 | `/compact` | Summarize the conversation so far to free up context |
 | `/mcp` | Show connected MCP servers and their tools |
-| `/diff`, `/todos`, `/usage` | Uncommitted changes; task list; token usage per model |
+| `/diff`, `/todos`, `/usage` | Uncommitted changes; task list; token usage per model, including prompt-cache hits |
 | `/clear`, `/quit` | New conversation; exit (or Ctrl+C twice) |
 
 ember reads project instructions from `AGENTS.md` or `EMBER.md` in the working directory.
@@ -228,6 +251,7 @@ No Nebius key is needed for a local server. Pick a model that fits the device's 
 | `TAVILY_API_KEY` | unset; enables `web_search` |
 | `EMBER_MODEL_FAST` / `EMBER_MODEL_CODER` / `EMBER_MODEL_REASONER` | the models in the table above |
 | `EMBER_FIX_BRANCHES` | `3` (1 to 4) |
+| `EMBER_THINK` | `on`; `low` or `off` for faster, shallower replies (same as `--think` / `/think`) |
 | `EMBER_MOUSE` | `on`; `off` keeps your terminal's normal text selection (no wheel scrolling) |
 | `EMBER_COLORS` | auto; `256` or `truecolor` to override color detection |
 | `EMBER_TEST_CMD` | detected: `cargo test`, `go test ./...`, `pytest`, or `npm test` |

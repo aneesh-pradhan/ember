@@ -73,12 +73,14 @@ pub fn specs(read_only: bool) -> Vec<ToolSpec> {
     let mut specs = vec![
         ToolSpec::new(
             "read_file",
-            "Read a text file. Each line is shown as `<line number><TAB><content>`; the number and tab are not part of the file. Use offset/limit to page through large files.",
+            "Read text files. Each line is shown as `<line number><TAB><content>`; the number and tab are not part of \
+             the file. To read several files, list them all in `paths` in ONE call: that is much faster than one call \
+             per file. Use offset/limit to page through a single large file.",
             json!({"type": "object", "properties": {
-                "path": {"type": "string", "description": "Path relative to the workspace root"},
+                "path": {"type": "string", "description": "One file, relative to the workspace root"},
+                "paths": {"type": "array", "items": {"type": "string"}, "description": "Several files to read at once (up to 10)"},
                 "offset": {"type": "integer", "description": "1-based first line (default 1)"},
-                "limit": {"type": "integer", "description": "Max lines (default 400)"}},
-                "required": ["path"]}),
+                "limit": {"type": "integer", "description": "Max lines (default 400)"}}}),
         ),
         ToolSpec::new(
             "list_files",
@@ -156,7 +158,7 @@ fn s<'a>(args: &'a Value, key: &str) -> &'a str {
 /// A one-line description of a call, for the transcript.
 pub fn summary(name: &str, args: &Value) -> String {
     match name {
-        "read_file" => format!("Read {}", s(args, "path")),
+        "read_file" => format!("Read {}", read_paths(args).join(", ")),
         "list_files" => format!("List {} {}", if s(args, "path").is_empty() { "." } else { s(args, "path") }, s(args, "glob")).trim_end().to_string(),
         "grep" => format!("Search /{}/ {}", s(args, "pattern"), s(args, "glob")).trim_end().to_string(),
         "edit_file" => format!("Edit {}", s(args, "path")),
@@ -215,9 +217,44 @@ pub async fn run(ws: &Workspace, name: &str, args: &Value) -> Result<String, Str
     }
 }
 
+/// The files a read_file call asks for: `paths` (batched) and/or `path`.
+fn read_paths(args: &Value) -> Vec<String> {
+    let mut paths: Vec<String> = args["paths"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| p.as_str().map(String::from))
+        .collect();
+    if let Some(p) = args["path"].as_str().filter(|p| !p.is_empty()) {
+        if !paths.iter().any(|x| x == p) {
+            paths.insert(0, p.to_string());
+        }
+    }
+    paths.truncate(10);
+    paths
+}
+
 fn read_file(ws: &Workspace, args: &Value) -> Result<String, String> {
-    let path = ws.resolve(s(args, "path"))?;
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", s(args, "path")))?;
+    let paths = read_paths(args);
+    match paths.len() {
+        0 => Err("give `path` or `paths`".into()),
+        1 => read_one(ws, &paths[0], args),
+        _ => {
+            // Batched: each file with a header; a missing file is reported inline rather than failing the call.
+            let budget = MAX_OUTPUT / paths.len();
+            let mut out = String::new();
+            for path in &paths {
+                let body = read_one(ws, path, &json!({"limit": args["limit"]})).unwrap_or_else(|e| format!("Error: {e}\n"));
+                out.push_str(&format!("==> {path} <==\n{}\n", truncate(&body, budget)));
+            }
+            Ok(out)
+        }
+    }
+}
+
+fn read_one(ws: &Workspace, rel: &str, args: &Value) -> Result<String, String> {
+    let path = ws.resolve(rel)?;
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{rel}: {e}"))?;
     let lines: Vec<&str> = text.lines().collect();
     let start = args["offset"].as_u64().unwrap_or(1).max(1) as usize;
     let limit = args["limit"].as_u64().filter(|&l| l > 0).unwrap_or(400) as usize;
@@ -556,6 +593,20 @@ mod tests {
     fn detects_test_paths() {
         assert!(is_test_path("tests/test_x.py") && is_test_path("pkg/foo_test.go") && is_test_path("src/a.spec.ts"));
         assert!(!is_test_path("src/main.rs") && !is_test_path("src/attest.rs"));
+    }
+
+    #[test]
+    fn batched_reads() {
+        let dir = std::env::temp_dir().join(format!("ember-read-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "alpha\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "beta\n").unwrap();
+        let ws = Workspace::new(dir.clone());
+        let out = read_file(&ws, &json!({"paths": ["a.txt", "b.txt", "missing.txt"]})).unwrap();
+        assert!(out.contains("==> a.txt <==") && out.contains("alpha") && out.contains("beta"));
+        assert!(out.contains("==> missing.txt <==\nError:"));
+        assert_eq!(read_file(&ws, &json!({"path": "a.txt"})).unwrap(), "     1\talpha\n");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
