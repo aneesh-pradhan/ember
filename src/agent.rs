@@ -163,6 +163,7 @@ impl Agent {
             Err(err) => (format!("Error: {err}"), false),
         };
         let _ = tx.send(AgentEvent::ToolDone { name: name.into(), summary, output: output.clone(), ok });
+        debug_log(name, &args, &output);
         output
     }
 }
@@ -208,4 +209,14 @@ pub fn system_prompt(root: &Path) -> String {
         root.display(),
         std::env::consts::OS,
     )
+}
+
+/// Append tool calls to the file named by EMBER_LOG (for debugging model behavior).
+fn debug_log(name: &str, args: &serde_json::Value, output: &str) {
+    let Ok(path) = std::env::var("EMBER_LOG") else { return };
+    let entry = serde_json::json!({"tool": name, "args": args, "output": tools::truncate(output, 2000)});
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        use std::io::Write;
+        let _ = writeln!(f, "{entry}");
+    }
 }

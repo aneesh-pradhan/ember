@@ -73,7 +73,7 @@ pub fn specs(read_only: bool) -> Vec<ToolSpec> {
     let mut specs = vec![
         ToolSpec::new(
             "read_file",
-            "Read a text file with line numbers. Use offset/limit to page through large files.",
+            "Read a text file. Each line is shown as `<line number><TAB><content>`; the number and tab are not part of the file. Use offset/limit to page through large files.",
             json!({"type": "object", "properties": {
                 "path": {"type": "string", "description": "Path relative to the workspace root"},
                 "offset": {"type": "integer", "description": "1-based first line (default 1)"},
@@ -205,7 +205,7 @@ fn read_file(ws: &Workspace, args: &Value) -> Result<String, String> {
     let end = (start - 1 + limit).min(lines.len());
     let mut out = String::new();
     for (i, line) in lines[start - 1..end].iter().enumerate() {
-        out.push_str(&format!("{:>5}  {line}\n", start + i));
+        out.push_str(&format!("{:>6}\t{line}\n", start + i));
     }
     if end < lines.len() {
         out.push_str(&format!("... ({} more lines; continue with offset={})\n", lines.len() - end, end + 1));
@@ -312,7 +312,64 @@ fn replace(text: &str, old: &str, new: &str, replace_all: bool) -> Result<String
         out.push_str(&lines[i + needle.len()..].concat());
         return Ok(out);
     }
-    Err("old_string not found; read the file and copy the exact lines".into())
+    if let Some(out) = replace_reindented(&lines, &needle, new) {
+        return Ok(out);
+    }
+    Err("old_string not found; read the file and copy the exact lines (without the line-number prefix)".into())
+}
+
+fn indent_of(line: &str) -> usize {
+    line.len() - line.trim_start_matches(' ').len()
+}
+
+/// Match `needle` where its lines are shifted by a consistent number of spaces (a common slip when
+/// copying from numbered output), and shift `new` back by the same amounts. The first line may carry its
+/// own shift, since copying usually starts after the indentation of the first line.
+fn replace_reindented(lines: &[&str], needle: &[&str], new: &str) -> Option<String> {
+    let shifts_at = |i: usize| -> Option<(isize, Option<isize>)> {
+        let mut first = None;
+        let mut rest: Option<isize> = None;
+        for (k, (file_line, want)) in lines[i..i + needle.len()].iter().zip(needle).enumerate() {
+            let (f, w) = (file_line.trim_end(), want.trim_end());
+            if f.trim().is_empty() && w.trim().is_empty() {
+                continue;
+            }
+            if f.trim_start() != w.trim_start() {
+                return None;
+            }
+            let delta = indent_of(w) as isize - indent_of(f) as isize;
+            if k == 0 {
+                first = Some(delta);
+            } else if *rest.get_or_insert(delta) != delta {
+                return None;
+            }
+        }
+        Some((first?, rest))
+    };
+    let found: Vec<(usize, (isize, Option<isize>))> =
+        (0..=lines.len() - needle.len()).filter_map(|i| shifts_at(i).map(|d| (i, d))).collect();
+    let [(i, (first, rest))] = found[..] else { return None };
+    let shift = |line: &str, delta: isize| -> String {
+        if delta > 0 {
+            line[(delta as usize).min(indent_of(line))..].to_string()
+        } else {
+            format!("{}{line}", " ".repeat((-delta) as usize))
+        }
+    };
+    let reindented: Vec<String> = new
+        .trim_end_matches('\n')
+        .lines()
+        .enumerate()
+        .map(|(k, l)| shift(l, if k == 0 { first } else { rest.unwrap_or(first) }))
+        .collect();
+    let last = lines[i + needle.len() - 1];
+    let mut out: String = lines[..i].concat();
+    out.push_str(&reindented.join("\n"));
+    if last.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(&lines[i + needle.len()..].concat());
+    Some(out)
 }
 
 fn edit_file(ws: &Workspace, args: &Value) -> Result<String, String> {
@@ -445,6 +502,13 @@ mod tests {
         assert_eq!(apply_edit("a\na\n", "a", "b", true).unwrap(), "b\nb\n");
         assert!(apply_edit("a\n", "zzz", "b", false).is_err());
         assert_eq!(apply_edit("x\ny\n", "y\n", "z", false).unwrap(), "x\nz\n");
+        // Every line shifted by two extra spaces, as when copied from numbered output.
+        let src = "def f():\n    a = 1\n    return a\n";
+        let got = apply_edit(src, "  def f():\n      a = 1\n      return a", "  def f():\n      a = 2\n      return a", false);
+        assert_eq!(got.unwrap(), "def f():\n    a = 2\n    return a\n");
+        // The case Nemotron produced: first line exact, following lines two spaces too deep.
+        let got = apply_edit(src, "def f():\n      a = 1\n      return a", "def f(b):\n      a = b\n      return a", false);
+        assert_eq!(got.unwrap(), "def f(b):\n    a = b\n    return a\n");
     }
 
     #[test]
