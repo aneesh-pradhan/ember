@@ -1,5 +1,5 @@
-//! The terminal UI. Finished output is printed into the terminal's normal scrollback;
-//! only a small inline area at the bottom (live output, popups, input, status) is redrawn.
+//! The full-screen terminal UI: a scrollable conversation, a bordered prompt pinned to the bottom,
+//! suggestions and permission prompts beneath it, and a status line. Every frame is drawn from state.
 
 use std::collections::BTreeMap;
 use std::io::stdout;
@@ -8,13 +8,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event, EventStream, KeyCode,
+    KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
+};
 use futures_util::StreamExt;
-use ratatui::layout::{Constraint, Layout, Position};
+use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Widget};
-use ratatui::{DefaultTerminal, Frame, TerminalOptions, Viewport};
+use ratatui::widgets::{Block, BorderType, Padding, Paragraph, Widget};
+use ratatui::{DefaultTerminal, Frame};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -27,7 +30,6 @@ use crate::session;
 use crate::tools::{self, Workspace};
 use crate::{logo, markdown, theme};
 
-const VIEW_HEIGHT: u16 = 12;
 const MAX_ATTACHMENT: u64 = 200_000;
 
 /// Slash commands: name, description, whether it takes an argument.
@@ -75,7 +77,16 @@ pub struct App {
     popup_sel: usize,
     popup_token: String,
     usage: BTreeMap<String, (u64, u64)>,
-    pending: Vec<Line<'static>>,
+    /// Everything printed so far, unwrapped.
+    transcript: Vec<Line<'static>>,
+    /// `transcript` wrapped to `wrap_width`, extended incrementally.
+    wrapped: Vec<Line<'static>>,
+    wrapped_from: usize,
+    wrap_width: u16,
+    /// Lines scrolled up from the bottom; 0 follows new output.
+    scroll: usize,
+    body_height: usize,
+    approval_sel: usize,
     frame: usize,
     quit: bool,
     last_ctrl_c: Option<Instant>,
@@ -129,14 +140,25 @@ pub async fn run(config: Config, cwd: PathBuf, mode: Mode, initial: Option<Strin
         popup_sel: 0,
         popup_token: String::new(),
         usage: BTreeMap::new(),
-        pending: vec![],
+        transcript: vec![],
+        wrapped: vec![],
+        wrapped_from: 0,
+        wrap_width: 0,
+        scroll: 0,
+        body_height: 0,
+        approval_sel: 0,
         frame: 0,
         quit: false,
         last_ctrl_c: None,
     };
 
-    let mut terminal = ratatui::init_with_options(TerminalOptions { viewport: Viewport::Inline(VIEW_HEIGHT) });
+    let mut terminal = ratatui::init();
+    // Mouse capture gives wheel scrolling; EMBER_MOUSE=off keeps the terminal's own click-and-drag selection.
+    let mouse = !matches!(std::env::var("EMBER_MOUSE").as_deref(), Ok("off" | "0" | "false"));
     let _ = crossterm::execute!(stdout(), EnableBracketedPaste);
+    if mouse {
+        let _ = crossterm::execute!(stdout(), EnableMouseCapture);
+    }
     app.print_header();
     if resume_last {
         app.resume("1");
@@ -145,10 +167,11 @@ pub async fn run(config: Config, cwd: PathBuf, mode: Mode, initial: Option<Strin
         app.submit(prompt);
     }
     let result = app.main_loop(&mut terminal, rx).await;
-    let _ = app.flush(&mut terminal);
-    let _ = terminal.clear();
-    let _ = crossterm::execute!(stdout(), DisableBracketedPaste);
+    let _ = crossterm::execute!(stdout(), DisableMouseCapture, DisableBracketedPaste);
     ratatui::restore();
+    if !app.usage.is_empty() {
+        println!("ember: conversation saved. Continue it with `ember -c`.");
+    }
     result
 }
 
@@ -157,7 +180,6 @@ impl App {
         let mut events = EventStream::new();
         let mut tick = tokio::time::interval(Duration::from_millis(100));
         loop {
-            self.flush(terminal)?;
             terminal.draw(|f| self.draw(f))?;
             if self.quit {
                 return Ok(());
@@ -177,35 +199,23 @@ impl App {
     // ------------------------------------------------------------- output
 
     fn print(&mut self, lines: impl IntoIterator<Item = Line<'static>>) {
-        self.pending.extend(lines);
+        self.transcript.extend(lines);
     }
 
     fn print_line(&mut self, line: Line<'static>) {
-        self.pending.push(line);
-    }
-
-    fn flush(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
-        if self.pending.is_empty() {
-            return Ok(());
-        }
-        let size = terminal.size()?;
-        let lines = markdown::wrap(&std::mem::take(&mut self.pending), size.width);
-        let chunk = size.height.saturating_sub(VIEW_HEIGHT).max(1) as usize;
-        for part in lines.chunks(chunk) {
-            let part = part.to_vec();
-            terminal.insert_before(part.len() as u16, |buf| {
-                let area = buf.area;
-                Paragraph::new(part).render(area, buf);
-                theme::adapt(buf);
-            })?;
-        }
-        Ok(())
+        self.transcript.push(line);
     }
 
     fn short_cwd(&self) -> String {
         let cwd = self.cwd.display().to_string();
         let home = dirs::home_dir().map(|h| h.display().to_string()).unwrap_or_default();
-        if !home.is_empty() && cwd.starts_with(&home) { cwd.replacen(&home, "~", 1) } else { cwd }
+        let cwd = if !home.is_empty() && cwd.starts_with(&home) { cwd.replacen(&home, "~", 1) } else { cwd };
+        // Keep the banner on one line per row: elide the middle of long paths.
+        let chars: Vec<char> = cwd.chars().collect();
+        if chars.len() <= 48 {
+            return cwd;
+        }
+        format!("…{}", chars[chars.len() - 47..].iter().collect::<String>())
     }
 
     fn print_header(&mut self) {
@@ -233,7 +243,7 @@ impl App {
     }
 
     fn print_diff(&mut self, diff: &str, max: usize) {
-        self.pending.extend(diff_lines(diff, max));
+        self.transcript.extend(diff_lines(diff, max));
     }
 
     fn print_reply(&mut self, content: &str) {
@@ -306,6 +316,7 @@ impl App {
                     }
                 }
                 self.approval = Some(req);
+                self.approval_sel = 0;
             }
             AgentEvent::Usage { model, prompt, completion } => {
                 let entry = self.usage.entry(model).or_default();
@@ -337,7 +348,7 @@ impl App {
 
     fn on_fix(&mut self, ev: FixEvent) {
         let view = self.fix.get_or_insert_with(FixView::default);
-        let out = &mut self.pending;
+        let out = &mut self.transcript;
         match ev {
             FixEvent::Stage { name, status, detail } => {
                 match view.stages.iter_mut().find(|(n, _)| *n == name) {
@@ -423,6 +434,11 @@ impl App {
                 self.sync_popup();
             }
             Event::Paste(text) if self.approval.is_none() => self.input.insert(&text),
+            Event::Mouse(mouse) => match mouse.kind {
+                MouseEventKind::ScrollUp => self.scroll += 3,
+                MouseEventKind::ScrollDown => self.scroll = self.scroll.saturating_sub(3),
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -442,8 +458,19 @@ impl App {
 
     fn on_approval_key(&mut self, key: KeyEvent, req: ApprovalRequest) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let options = approval_options(&req);
         let decision = match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => Some(Decision::Yes),
+            KeyCode::Up => {
+                self.approval_sel = (self.approval_sel + options.len() - 1) % options.len();
+                None
+            }
+            KeyCode::Down => {
+                self.approval_sel = (self.approval_sel + 1) % options.len();
+                None
+            }
+            KeyCode::Enter => Some(options[self.approval_sel.min(options.len() - 1)].0),
+            KeyCode::Char(c @ '1'..='3') => options.get(c as usize - '1' as usize).map(|o| o.0),
+            KeyCode::Char('y') | KeyCode::Char('Y') => Some(Decision::Yes),
             KeyCode::Char('a') | KeyCode::Char('A') if req.always.is_some() => Some(Decision::Always),
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Some(Decision::No),
             KeyCode::Char('c') if ctrl => Some(Decision::No),
@@ -525,6 +552,11 @@ impl App {
                 }
             }
             KeyCode::Char('d') if ctrl && self.input.is_empty() => self.quit = true,
+            KeyCode::PageUp => self.scroll += self.body_height.saturating_sub(2).max(1),
+            KeyCode::PageDown => self.scroll = self.scroll.saturating_sub(self.body_height.saturating_sub(2).max(1)),
+            KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => self.scroll += 1,
+            KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => self.scroll = self.scroll.saturating_sub(1),
+            KeyCode::End if ctrl => self.scroll = 0,
             KeyCode::Esc if self.task.is_some() => self.interrupt(),
             KeyCode::Esc => self.input.clear(),
             KeyCode::BackTab => self.set_mode(self.mode.get().next()),
@@ -590,6 +622,7 @@ impl App {
     }
 
     fn submit(&mut self, text: String) {
+        self.scroll = 0;
         let text = text.trim().to_string();
         if let Some(command) = text.strip_prefix('/') {
             self.command(command.to_string());
@@ -902,41 +935,96 @@ impl App {
         (!items.is_empty()).then_some(Popup { kind: PopupKind::File, start, items })
     }
 
-    fn draw(&self, f: &mut Frame) {
-        let [live, rule, input, status] =
-            Layout::vertical([Constraint::Min(1), Constraint::Length(1), Constraint::Length(3), Constraint::Length(1)]).areas(f.area());
-
-        let live_lines = match self.popup() {
-            Some(popup) => self.popup_lines(&popup, live.height as usize, live.width),
-            None => self.live_lines(live.width),
+    fn draw(&mut self, f: &mut Frame) {
+        let popup = self.popup();
+        let prompt_height = match &self.approval {
+            Some(req) => 4 + approval_options(req).len() as u16,
+            None => self.input.text().split('\n').count().clamp(1, 6) as u16 + 2,
         };
-        let skip = live_lines.len().saturating_sub(live.height as usize);
-        Paragraph::new(live_lines[skip..].to_vec()).render(live, f.buffer_mut());
+        let footer_height = popup.as_ref().map_or(1, |p| p.items.len().min(8) as u16);
+        let [body, prompt, footer] =
+            Layout::vertical([Constraint::Min(3), Constraint::Length(prompt_height), Constraint::Length(footer_height)])
+                .areas(f.area());
 
-        let rule_style = match (self.approval.is_some(), self.mode.get()) {
-            (true, _) => theme::accent(),
-            (_, Mode::Plan) => theme::info(),
-            (_, Mode::Auto) => theme::accent(),
-            _ => theme::dim(),
+        self.render_body(f, body);
+        if self.approval.is_some() {
+            self.render_approval(f, prompt);
+        } else {
+            self.render_input(f, prompt);
+        }
+        match popup {
+            Some(p) => Paragraph::new(self.popup_lines(&p, footer.height as usize, footer.width)).render(footer, f.buffer_mut()),
+            None => self.render_status(f, footer),
+        }
+        theme::adapt(f.buffer_mut());
+    }
+
+    /// The conversation, wrapped to the screen, bottom-following unless scrolled up.
+    fn render_body(&mut self, f: &mut Frame, area: Rect) {
+        let width = area.width.saturating_sub(1).max(10);
+        if width != self.wrap_width {
+            self.wrap_width = width;
+            self.wrapped.clear();
+            self.wrapped_from = 0;
+        }
+        if self.wrapped_from < self.transcript.len() {
+            let new = markdown::wrap(&self.transcript[self.wrapped_from..], width);
+            if self.scroll > 0 {
+                self.scroll += new.len(); // keep the view still while scrolled back
+            }
+            self.wrapped.extend(new);
+            self.wrapped_from = self.transcript.len();
+        }
+        let live = markdown::wrap(&self.live_lines(width), width);
+        let gap = usize::from(!live.is_empty());
+        let total = self.wrapped.len() + gap + live.len();
+        let height = area.height as usize;
+        self.body_height = height;
+        self.scroll = self.scroll.min(total.saturating_sub(height));
+        let end = total - self.scroll;
+        let lines: Vec<Line> = (end.saturating_sub(height)..end)
+            .map(|i| match i.checked_sub(self.wrapped.len()) {
+                None => self.wrapped[i].clone(),
+                Some(j) if j < gap => Line::default(),
+                Some(j) => live[j - gap].clone(),
+            })
+            .collect();
+        Paragraph::new(lines).render(area, f.buffer_mut());
+        if self.scroll > 0 {
+            let note = format!(" ↓ {} more lines · PgDn or ctrl+end ", self.scroll);
+            let w = (note.chars().count() as u16).min(area.width);
+            let spot = Rect { x: area.right() - w, y: area.bottom() - 1, width: w, height: 1 };
+            Paragraph::new(Line::styled(note, theme::accent().add_modifier(Modifier::REVERSED))).render(spot, f.buffer_mut());
+        }
+    }
+
+    fn render_input(&self, f: &mut Frame, area: Rect) {
+        let border = match self.mode.get() {
+            Mode::Plan => theme::info(),
+            Mode::Auto => theme::accent(),
+            Mode::Ask => theme::dim(),
         };
-        Paragraph::new(Line::styled("─".repeat(rule.width as usize), rule_style)).render(rule, f.buffer_mut());
+        let block = Block::bordered().border_type(BorderType::Rounded).border_style(border).padding(Padding::horizontal(1));
+        let inner = block.inner(area);
+        block.render(area, f.buffer_mut());
 
         let (row, col) = self.input.cursor_pos();
-        let first = row.saturating_sub(input.height as usize - 1);
+        let first = row.saturating_sub((inner.height as usize).saturating_sub(1));
         let lines: Vec<Line> = if self.input.is_empty() {
             let hint = match self.mode.get() {
-                Mode::Plan => "Plan mode: describe what you want; ember will investigate and propose a plan",
-                _ => "Ask ember to build, fix or explain something · @ to attach files · / for commands",
+                Mode::Plan => "Describe what you want; ember will investigate and propose a plan",
+                _ => "Ask ember to build, fix or explain something",
             };
             vec![Line::from(vec![Span::styled("› ", theme::accent()), Span::styled(hint, theme::dim())])]
         } else {
+            let shell = self.input.text().starts_with('!');
             self.input
                 .text()
                 .split('\n')
                 .enumerate()
                 .skip(first)
                 .map(|(i, l)| {
-                    let lead = match (i, self.input.text().starts_with('!')) {
+                    let lead = match (i, shell) {
                         (0, true) => Span::styled("! ", theme::code()),
                         (0, false) => Span::styled("› ", theme::accent()),
                         _ => Span::raw("  "),
@@ -945,14 +1033,68 @@ impl App {
                 })
                 .collect()
         };
-        Paragraph::new(lines).render(input, f.buffer_mut());
-        if self.approval.is_none() {
-            let x = (input.x + 2 + col as u16).min(input.right().saturating_sub(1));
-            f.set_cursor_position(Position { x, y: input.y + (row - first) as u16 });
-        }
+        Paragraph::new(lines).render(inner, f.buffer_mut());
+        let x = (inner.x + 2 + col as u16).min(inner.right().saturating_sub(1));
+        f.set_cursor_position(Position { x, y: inner.y + (row - first) as u16 });
+    }
 
-        Paragraph::new(self.status_line()).render(status, f.buffer_mut());
-        theme::adapt(f.buffer_mut());
+    fn render_approval(&self, f: &mut Frame, area: Rect) {
+        let Some(req) = &self.approval else { return };
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(theme::accent())
+            .title(Span::styled(" Permission ", theme::accent().add_modifier(Modifier::BOLD)))
+            .padding(Padding::horizontal(1));
+        let inner = block.inner(area);
+        block.render(area, f.buffer_mut());
+        let options = approval_options(req);
+        let sel = self.approval_sel.min(options.len() - 1);
+        let mut lines = vec![
+            Line::from(vec![Span::styled("Allow ", theme::bold()), Span::styled(format!("{}?", req.summary), theme::bold())]),
+            Line::default(),
+        ];
+        for (i, (_, label)) in options.iter().enumerate() {
+            let selected = i == sel;
+            lines.push(Line::from(vec![
+                Span::styled(if selected { "› " } else { "  " }, theme::accent()),
+                Span::styled(
+                    format!("{}. {label}", i + 1),
+                    if selected { theme::accent().add_modifier(Modifier::BOLD) } else { ratatui::style::Style::default() },
+                ),
+            ]));
+        }
+        Paragraph::new(lines).render(inner, f.buffer_mut());
+    }
+
+    fn render_status(&self, f: &mut Frame, area: Rect) {
+        let model = self.model.lock().unwrap().clone();
+        let tier = [Tier::Fast, Tier::Coder, Tier::Reasoner].into_iter().find(|t| self.config.model(*t) == model);
+        let mut right = vec![];
+        if let Some((used, window)) = self.context.filter(|(u, _)| *u > 0) {
+            let pct = (used as f64 / window as f64 * 100.0).round() as u64;
+            let style = if pct >= 80 { theme::err() } else if pct >= 50 { theme::code() } else { theme::dim() };
+            right.push(Span::styled(format!("ctx {pct}%  "), style));
+        }
+        let tokens: u64 = self.usage.values().map(|(p, c)| p + c).sum();
+        if tokens > 0 {
+            right.push(Span::styled(format!("{:.1}k tok  ", tokens as f64 / 1000.0), theme::dim()));
+        }
+        right.push(Span::styled(tier.map_or("custom", |t| t.label()).to_string(), tier.map_or(theme::bold(), theme::tier)));
+        right.push(Span::styled(format!(" {} ", model.rsplit('/').next().unwrap_or("")), theme::dim()));
+        let right = Line::from(right);
+
+        let mut left = match self.mode.get() {
+            Mode::Auto => vec![Span::styled(" ⏵⏵ auto-accept on", theme::accent())],
+            Mode::Plan => vec![Span::styled(" ⏸ plan mode on", theme::info())],
+            Mode::Ask => vec![Span::styled(" ? /help", theme::dim())],
+        };
+        let hints = " · shift+tab mode · / commands · @ files · ! shell";
+        let room = (area.width as usize).saturating_sub(right.width() + 2);
+        if Line::from(left.clone()).width() + hints.chars().count() <= room {
+            left.push(Span::styled(hints, theme::dim()));
+        }
+        Paragraph::new(Line::from(left)).render(area, f.buffer_mut());
+        Paragraph::new(right).alignment(Alignment::Right).render(area, f.buffer_mut());
     }
 
     fn popup_lines(&self, popup: &Popup, height: usize, width: u16) -> Vec<Line<'static>> {
@@ -978,17 +1120,6 @@ impl App {
     }
 
     fn live_lines(&self, width: u16) -> Vec<Line<'static>> {
-        if let Some(req) = &self.approval {
-            let mut options = vec![Span::styled("  y", theme::accent()), Span::raw(" yes   ")];
-            if let Some(always) = &req.always {
-                options.extend([Span::styled("a", theme::accent()), Span::raw(format!(" always allow {always}   "))]);
-            }
-            options.extend([Span::styled("n", theme::accent()), Span::raw(" no")]);
-            return vec![
-                Line::from(vec![Span::styled("◇ ", theme::accent()), Span::styled(format!("Allow: {}?", req.summary), theme::bold())]),
-                Line::from(options),
-            ];
-        }
         let Some(_) = &self.task else { return vec![] };
         let spinner = theme::SPINNER[self.frame % theme::SPINNER.len()];
         let elapsed = self.task_started.elapsed().as_secs();
@@ -1052,32 +1183,16 @@ impl App {
         lines.push(Line::from(status));
         lines
     }
+}
 
-    fn status_line(&self) -> Line<'static> {
-        let model = self.model.lock().unwrap().clone();
-        let tier = [Tier::Fast, Tier::Coder, Tier::Reasoner].into_iter().find(|t| self.config.model(*t) == model);
-        let label = tier.map_or("custom", |t| t.label());
-        let mut spans = vec![
-            Span::styled(format!(" {label} "), tier.map_or(theme::bold(), theme::tier)),
-            Span::styled(model.rsplit('/').next().unwrap_or("").to_string(), theme::dim()),
-        ];
-        match self.mode.get() {
-            Mode::Auto => spans.push(Span::styled("  ⏵⏵ auto-accept", theme::accent())),
-            Mode::Plan => spans.push(Span::styled("  ⏸ plan mode", theme::info())),
-            Mode::Ask => {}
-        }
-        if let Some((used, window)) = self.context.filter(|(u, _)| *u > 0) {
-            let pct = (used as f64 / window as f64 * 100.0).round() as u64;
-            let style = if pct >= 80 { theme::err() } else if pct >= 50 { theme::code() } else { theme::dim() };
-            spans.push(Span::styled(format!("  ctx {pct}%"), style));
-        }
-        let tokens: u64 = self.usage.values().map(|(p, c)| p + c).sum();
-        if tokens > 0 {
-            spans.push(Span::styled(format!("  {:.1}k tok", tokens as f64 / 1000.0), theme::dim()));
-        }
-        spans.push(Span::styled("  · shift+tab mode · / commands · @ files", theme::dim()));
-        Line::from(spans)
+/// The choices on a permission prompt, in display order.
+fn approval_options(req: &ApprovalRequest) -> Vec<(Decision, String)> {
+    let mut options = vec![(Decision::Yes, "Yes".to_string())];
+    if let Some(always) = &req.always {
+        options.push((Decision::Always, format!("Yes, and allow {always} for the rest of this session")));
     }
+    options.push((Decision::No, "No, and tell ember what to do instead".to_string()));
+    options
 }
 
 fn notice(text: impl Into<String>) -> Line<'static> {

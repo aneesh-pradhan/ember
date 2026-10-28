@@ -142,6 +142,11 @@ ember --model ultra                # pick the model tier
 | Ctrl+T | Show the task list |
 | Alt+Enter / Ctrl+J | New line |
 
+ember runs full screen: the conversation scrolls above a prompt box pinned to the bottom. Scroll back with the
+mouse wheel, PgUp/PgDn or Shift+↑/↓, and jump back to live output with Ctrl+End. Permission prompts appear as a
+panel in place of the prompt: pick with ↑/↓ and Enter, or press 1-3 (or y/a/n). Because ember uses the mouse for
+scrolling, select text with Shift-drag (Option-drag in iTerm2), or set `EMBER_MOUSE=off` to keep normal selection.
+
 For multi-step work ember keeps a live **task list**, and the status bar shows how full the **context window**
 is. Near the limit ember compacts the conversation automatically. When a command needs approval, "always" applies
 to that command family (e.g. all `cargo test` runs), never to arbitrary shell. Conversations are saved
@@ -171,6 +176,8 @@ ember reads project instructions from `AGENTS.md` or `EMBER.md` in the working d
 | `NEBIUS_BASE_URL` | `https://api.tokenfactory.nebius.com/v1/` |
 | `EMBER_MODEL_FAST` / `EMBER_MODEL_CODER` / `EMBER_MODEL_REASONER` | the models in the table above |
 | `EMBER_FIX_BRANCHES` | `3` (1 to 4) |
+| `EMBER_MOUSE` | `on`; `off` keeps your terminal's normal text selection (no wheel scrolling) |
+| `EMBER_COLORS` | auto; `256` or `truecolor` to override color detection |
 | `EMBER_TEST_CMD` | detected: `cargo test`, `go test ./...`, `pytest`, or `npm test` |
 
 ## Try `/fix` on the demo project
