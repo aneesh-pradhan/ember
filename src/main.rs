@@ -1,14 +1,19 @@
 mod agent;
+mod commands;
 mod config;
 mod fix;
+mod git;
 mod input;
 mod llm;
 mod logo;
 mod markdown;
+mod mcp;
 mod session;
 mod theme;
 mod tools;
 mod ui;
+mod vision;
+mod web;
 
 use std::io::Write;
 use std::sync::{Arc, Mutex};
@@ -65,7 +70,8 @@ async fn print_mode(config: Config, cwd: std::path::PathBuf, prompt: String, yes
     let client = Client::new(&config.base_url, config.api_key.clone());
     let model = Arc::new(Mutex::new(config.coder.clone()));
     let mode = SharedMode::new(if yes { Mode::Auto } else { Mode::Ask });
-    let mut agent = Agent::new(client, model, mode, Workspace::new(cwd));
+    let mut agent = Agent::new(client, model, mode, Workspace::new(cwd.clone()));
+    agent.mcp.clone().start(&cwd).await;
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let turn = tokio::spawn(async move { agent.turn(prompt, &tx).await });
     let mut out = std::io::stdout();

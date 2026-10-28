@@ -138,8 +138,7 @@ impl Client {
     }
 
     pub async fn list_models(&self) -> Result<Vec<String>> {
-        let key = self.key()?;
-        let resp = self.http.get(format!("{}models", self.base_url)).bearer_auth(key).send().await?;
+        let resp = self.auth(self.http.get(format!("{}models", self.base_url)))?.send().await?;
         let status = resp.status();
         let body: Value = resp.json().await?;
         if !status.is_success() {
@@ -153,15 +152,43 @@ impl Client {
         Ok(ids)
     }
 
-    fn key(&self) -> Result<&str> {
-        self.api_key
-            .as_deref()
-            .ok_or_else(|| anyhow!("NEBIUS_API_KEY is not set (put it in .env or ~/.config/ember/env)"))
+    /// A non-streaming request with a caller-built body (e.g. multimodal content). Returns text and usage.
+    pub async fn complete_raw(&self, body: Value) -> Result<(String, Usage)> {
+        let resp = self.auth(self.http.post(format!("{}chat/completions", self.base_url)))?.json(&body).send().await?;
+        let status = resp.status();
+        let value: Value = resp.json().await?;
+        if !status.is_success() {
+            bail!("API error {status}: {value}");
+        }
+        let message = &value["choices"][0]["message"];
+        let mut splitter = ThinkSplitter::default();
+        let mut text: String = splitter
+            .feed(message["content"].as_str().unwrap_or(""))
+            .into_iter()
+            .filter(|(visible, _)| *visible)
+            .map(|(_, t)| t)
+            .collect();
+        let (visible, rest) = splitter.flush();
+        if visible {
+            text.push_str(&rest);
+        }
+        let usage = serde_json::from_value(value["usage"].clone()).unwrap_or_default();
+        Ok((text.trim().to_string(), usage))
+    }
+
+    /// Attach the API key. Token Factory requires one; a local server (EMBER_BASE_URL) may not.
+    fn auth(&self, req: reqwest::RequestBuilder) -> Result<reqwest::RequestBuilder> {
+        match &self.api_key {
+            Some(key) => Ok(req.bearer_auth(key)),
+            None if self.base_url.contains("nebius.com") => {
+                Err(anyhow!("NEBIUS_API_KEY is not set (put it in .env or ~/.config/ember/env)"))
+            }
+            None => Ok(req),
+        }
     }
 
     /// Stream a chat completion; `on_delta` sees visible text and reasoning as it arrives.
     pub async fn stream(&self, req: &Request, mut on_delta: impl FnMut(Delta)) -> Result<Response> {
-        let key = self.key()?;
         let mut body = serde_json::to_value(req)?;
         body["stream"] = json!(true);
         body["stream_options"] = json!({"include_usage": true});
@@ -169,9 +196,7 @@ impl Client {
         let mut attempt = 0;
         let resp = loop {
             let resp = self
-                .http
-                .post(format!("{}chat/completions", self.base_url))
-                .bearer_auth(key)
+                .auth(self.http.post(format!("{}chat/completions", self.base_url)))?
                 .json(&body)
                 .send()
                 .await?;

@@ -1,6 +1,6 @@
 [package]
 name = "ember"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "A terminal coding agent powered by NVIDIA Nemotron on Nebius Token Factory"
 license = "MIT"
@@ -9,6 +9,7 @@ readme = "README.md"
 
 [dependencies]
 anyhow = "1"
+base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 crossterm = { version = "0.28", features = ["event-stream"] }
 dirs = "5"

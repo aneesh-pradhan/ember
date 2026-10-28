@@ -59,7 +59,8 @@ impl Config {
         let var = |name: &str, default: &str| env::var(name).ok().filter(|v| !v.is_empty()).unwrap_or_else(|| default.to_string());
         Config {
             api_key: env::var("NEBIUS_API_KEY").ok().filter(|v| !v.is_empty()),
-            base_url: var("NEBIUS_BASE_URL", DEFAULT_BASE_URL),
+            // EMBER_BASE_URL points ember at any OpenAI-compatible server (e.g. Nemotron on your own Jetson).
+            base_url: env::var("EMBER_BASE_URL").ok().filter(|v| !v.is_empty()).unwrap_or_else(|| var("NEBIUS_BASE_URL", DEFAULT_BASE_URL)),
             fast: var("EMBER_MODEL_FAST", "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B"),
             coder: var("EMBER_MODEL_CODER", "nvidia/nemotron-3-super-120b-a12b"),
             reasoner: var("EMBER_MODEL_REASONER", "nvidia/Nemotron-3-Ultra-550b-a55b"),
@@ -75,6 +76,11 @@ impl Config {
             Tier::Reasoner => &self.reasoner,
         }
     }
+}
+
+/// The vision model used to look at images (Nemotron VL).
+pub fn vision_model() -> String {
+    env::var("EMBER_MODEL_VISION").ok().filter(|v| !v.is_empty()).unwrap_or_else(|| "nvidia/Nemotron-3.5-Super-VL".into())
 }
 
 /// Context window size in tokens for a model id (from the Token Factory catalog; conservative default).

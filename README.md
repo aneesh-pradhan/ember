@@ -39,7 +39,8 @@ ember routes each kind of work to the smallest Nemotron model that does it well:
 |---|---|---|
 | **Nano** | `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B` | `/fix` judgements: does this failing test really reproduce the bug? did the suite regress? |
 | **Super** | `nvidia/nemotron-3-super-120b-a12b` | The interactive agent; `/fix` investigation, test writing, and every branch's patching loop |
-| **Ultra** | `nvidia/Nemotron-3-Ultra-550b-a55b` | `/fix` strategy planning and choosing between passing candidates |
+| **Ultra** | `nvidia/Nemotron-3-Ultra-550b-a55b` | `/fix` strategy planning and choosing between passing candidates; `/review` |
+| **Super VL** | `nvidia/Nemotron-3.5-Super-VL` | ember's eyes: reads screenshots and diagrams you attach, and images the agent opens with `view_image` |
 
 Switch the interactive model at any time with `/model nano|super|ultra` (or any model id from `/models`).
 Nemotron's reasoning is streamed live in the UI (from `reasoning_content` or inline `<think>` blocks) and kept out of the transcript.
@@ -113,7 +114,7 @@ and run `cargo install --git https://github.com/aneesh-pradhan/ember`.
 
 - The installer downloads the matching binary from [Releases](https://github.com/aneesh-pradhan/ember/releases),
   verifies its SHA-256 checksum, and installs it to `~/.local/bin`.
-- `EMBER_INSTALL_DIR=/some/dir` installs elsewhere; `EMBER_VERSION=v0.2.1` pins a version.
+- `EMBER_INSTALL_DIR=/some/dir` installs elsewhere; `EMBER_VERSION=v0.4.0` pins a version.
 - **Update:** run the same one-liner again. **Uninstall:** `rm ~/.local/bin/ember`.
 - The key can also live in a `.env` file in the project you run ember from. Saved conversations are stored in
   `~/.local/share/ember` on Linux and `~/Library/Application Support/ember` on macOS.
@@ -135,7 +136,7 @@ ember --model ultra                # pick the model tier
 | Input | |
 |---|---|
 | `/` | Command menu: type to filter, ↑/↓ to choose, Tab or Enter to complete |
-| `@path` | Attach a file to your message; a fuzzy file picker pops up as you type |
+| `@path` | Attach a file (or image) to your message; a fuzzy file picker pops up as you type, Esc closes it |
 | `!command` | Run a shell command yourself; its output joins the conversation |
 | Shift+Tab | Cycle modes: **ask** before edits → **auto-accept** → **plan** (read-only, ends in a plan) |
 | Esc | Interrupt ember (or clear the input) |
@@ -157,23 +158,74 @@ automatically, so you can pick them up later.
 | Command | |
 |---|---|
 | `/fix <bug or GitHub issue URL>` | Reproduce with a failing test, fix in parallel worktrees, verify, apply on approval |
+| `/review` | Nemotron Ultra reviews your uncommitted changes, most severe findings first |
+| `/commit [note]` | Draft a commit message from your changes; stage and commit only after you approve |
+| `/branch <description>` | Create and switch to a well-named branch for the work |
+| `/pr` | Draft a pull request from the branch's commits; push and open it with `gh` after you approve |
+| `/resolve` | Work through merge conflicts, then run the tests |
+| `/undo` | Restore every file ember changed in its last turn (shell commands aren't undone) |
 | `/init` | Explore the repo and write an `AGENTS.md` for future sessions |
 | `/plan`, `/auto` | Toggle plan mode / auto-accept |
 | `/model [nano\|super\|ultra\|id]` | Show or switch the model; `/models` lists those on your key |
 | `/resume [n]` | List saved conversations in this directory, or continue one |
 | `/compact` | Summarize the conversation so far to free up context |
-| `/diff` | Show uncommitted changes |
-| `/todos`, `/usage` | Task list; token usage per model |
+| `/mcp` | Show connected MCP servers and their tools |
+| `/diff`, `/todos`, `/usage` | Uncommitted changes; task list; token usage per model |
 | `/clear`, `/quit` | New conversation; exit (or Ctrl+C twice) |
 
 ember reads project instructions from `AGENTS.md` or `EMBER.md` in the working directory.
+
+### Images, web and tools
+
+- **Images:** mention a screenshot with `@shot.png`, or drag an image file into the terminal. Nemotron Super VL
+  describes it (transcribing any text exactly) for the coding model. The agent can also look at images in your
+  repo with `view_image`.
+- **Web:** the agent can read pages with `web_fetch`. Set `TAVILY_API_KEY` ([tavily.com](https://tavily.com)) to also give it
+  `web_search`, and to have `web_fetch` use Tavily Extract for cleaner pages.
+- **MCP servers:** add stdio servers to `.ember/mcp.json` (per project) or `~/.config/ember/mcp.json`, in the
+  usual format. Each tool call asks for permission (or "always" for that tool):
+
+  ```json
+  {"mcpServers": {"github": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"],
+                             "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "..."}}}}
+  ```
+
+### Custom commands
+
+Save a prompt as Markdown in `.ember/commands/<name>.md` (shared with your team through the repo) or
+`~/.config/ember/commands/<name>.md` (just for you), and it becomes `/<name>`. `$ARGUMENTS` is replaced with
+whatever you type after the command, and `@file` mentions work inside it:
+
+```markdown
+---
+description: Explain a file to a beginner
+---
+Explain $ARGUMENTS to someone new to this codebase, in five bullet points.
+```
+
+### Run Nemotron on your own hardware
+
+ember speaks the OpenAI-compatible API, so it can drive a model served from your own machine, such as a
+Jetson dev kit or a workstation GPU. Start an OpenAI-compatible server (for example llama.cpp's `llama-server`,
+vLLM, or an NVIDIA NIM) with a Nemotron model that supports tool calling, then point ember at it:
+
+```bash
+EMBER_BASE_URL=http://jetson.local:8000/v1 \
+EMBER_MODEL_CODER=<model name your server reports> \
+ember
+```
+
+No Nebius key is needed for a local server. Pick a model that fits the device's memory, and set
+`EMBER_MODEL_FAST` / `EMBER_MODEL_REASONER` too if you use `/fix` or `/review`.
 
 ### Configuration
 
 | Variable | Default |
 |---|---|
-| `NEBIUS_API_KEY` | required |
-| `NEBIUS_BASE_URL` | `https://api.tokenfactory.nebius.com/v1/` |
+| `NEBIUS_API_KEY` | required for Token Factory |
+| `EMBER_BASE_URL` (or `NEBIUS_BASE_URL`) | `https://api.tokenfactory.nebius.com/v1/` |
+| `EMBER_MODEL_VISION` | `nvidia/Nemotron-3.5-Super-VL` |
+| `TAVILY_API_KEY` | unset; enables `web_search` |
 | `EMBER_MODEL_FAST` / `EMBER_MODEL_CODER` / `EMBER_MODEL_REASONER` | the models in the table above |
 | `EMBER_FIX_BRANCHES` | `3` (1 to 4) |
 | `EMBER_MOUSE` | `on`; `off` keeps your terminal's normal text selection (no wheel scrolling) |
@@ -197,14 +249,19 @@ EMBER_TEST_CMD="uvx pytest -q" ember
 ```
 src/
   main.rs      CLI (interactive, print mode)
-  ui.rs        Ratatui inline-viewport TUI: scrollback transcript, live area, popups, approvals, /fix progress
-  session.rs   saved conversations for /resume and --continue
-  logo.rs      the pocket-rig mascot
-  agent.rs     agent loop: stream → tool calls → approval → results → repeat; cancellation-safe history
+  ui.rs        full-screen Ratatui TUI: conversation, prompt box, suggestions, permission panel, status line
+  agent.rs     agent loop: stream → tool calls → approval → results → repeat; checkpoints for /undo
   fix.rs       /fix pipeline over git worktrees
+  git.rs       /commit, /branch, /pr and git status
   llm.rs       streaming OpenAI-compatible client: SSE, tool-call assembly, <think> splitting, retries
   tools.rs     read_file, list_files, grep (.gitignore-aware), edit_file, write_file, bash
+  web.rs       web_search (Tavily) and web_fetch
+  vision.rs    images through Nemotron VL
+  mcp.rs       MCP client for stdio servers
+  commands.rs  custom slash commands
+  session.rs   saved conversations for /resume and --continue
   markdown.rs  Markdown rendering and word wrapping for the terminal
+  logo.rs      the chibi mascot
 ```
 
 ```bash

@@ -1,7 +1,7 @@
 //! The interactive agent loop: stream a reply, run the tools it asks for, feed results back.
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -10,9 +10,10 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::config::context_window;
+use crate::config::{context_window, vision_model};
 use crate::fix::FixEvent;
 use crate::llm::{Client, Delta, Message, Request, ToolCall, ToolSpec};
+use crate::mcp::Mcp;
 use crate::session::{self, Session};
 use crate::tools::{self, Workspace};
 
@@ -132,6 +133,18 @@ pub fn command_prefix(command: &str) -> Option<String> {
     }
 }
 
+fn view_image_spec() -> ToolSpec {
+    ToolSpec::new(
+        "view_image",
+        "Look at an image file in the workspace (screenshot, diagram, mockup) using a vision model. Returns a \
+         detailed description including any text in it.",
+        json!({"type": "object", "properties": {
+            "path": {"type": "string"},
+            "question": {"type": "string", "description": "What you need to know from the image"}},
+            "required": ["path"]}),
+    )
+}
+
 fn todo_spec() -> ToolSpec {
     ToolSpec::new(
         "update_todos",
@@ -145,8 +158,16 @@ fn todo_spec() -> ToolSpec {
     )
 }
 
+/// File contents from before a turn's edits, so the turn can be undone.
+struct Checkpoint {
+    label: String,
+    files: Vec<(PathBuf, Option<Vec<u8>>)>,
+}
+
 pub struct Agent {
     pub client: Client,
+    /// Tools from MCP servers; filled in the background after startup.
+    pub mcp: Arc<Mcp>,
     pub model: Arc<Mutex<String>>,
     pub mode: SharedMode,
     pub ws: Workspace,
@@ -156,12 +177,14 @@ pub struct Agent {
     session_id: String,
     title: String,
     last_prompt_tokens: u64,
+    checkpoints: Vec<Checkpoint>,
 }
 
 impl Agent {
     pub fn new(client: Client, model: Arc<Mutex<String>>, mode: SharedMode, ws: Workspace) -> Self {
         let mut agent = Agent {
             client,
+            mcp: Arc::new(Mcp::default()),
             model,
             mode,
             ws,
@@ -171,6 +194,7 @@ impl Agent {
             session_id: String::new(),
             title: String::new(),
             last_prompt_tokens: 0,
+            checkpoints: vec![],
         };
         agent.reset();
         agent
@@ -268,16 +292,28 @@ impl Agent {
         } else {
             input
         };
+        self.checkpoints.push(Checkpoint { label: self.title_for(&content), files: vec![] });
         self.messages.push(Message::user(content));
         let result = self.run_steps(tx, plan).await;
+        if self.checkpoints.last().is_some_and(|c| c.files.is_empty()) {
+            self.checkpoints.pop();
+        }
+        if self.checkpoints.len() > 20 {
+            self.checkpoints.remove(0);
+        }
         self.save();
         result
     }
 
     async fn run_steps(&mut self, tx: &Events, plan: bool) -> Result<()> {
-        let mut specs = tools::specs(plan);
-        specs.push(todo_spec());
+        let mut base = tools::specs(plan);
+        base.push(todo_spec());
+        base.push(view_image_spec());
         for _ in 0..MAX_STEPS {
+            let mut specs = base.clone();
+            if !plan {
+                specs.extend(self.mcp.specs()); // servers may finish starting mid-conversation
+            }
             let model = self.model.lock().unwrap().clone();
             let request = Request {
                 model: model.clone(),
@@ -319,6 +355,48 @@ impl Agent {
         Ok(())
     }
 
+    fn title_for(&self, input: &str) -> String {
+        tools::one_line(input, 60)
+    }
+
+    /// Remember a file's contents before its first edit in this turn.
+    fn snapshot(&mut self, name: &str, args: &serde_json::Value) {
+        if !matches!(name, "edit_file" | "write_file") {
+            return;
+        }
+        let Ok(path) = self.ws.resolve(args["path"].as_str().unwrap_or("")) else { return };
+        let Some(checkpoint) = self.checkpoints.last_mut() else { return };
+        if !checkpoint.files.iter().any(|(p, _)| *p == path) {
+            checkpoint.files.push((path.clone(), std::fs::read(&path).ok()));
+        }
+    }
+
+    /// Restore the files changed by the most recent turn that changed files.
+    /// Returns that turn's label and the files restored. Shell commands are not undone.
+    pub fn undo(&mut self) -> Option<(String, Vec<String>)> {
+        let checkpoint = self.checkpoints.pop()?;
+        let mut restored = vec![];
+        for (path, original) in checkpoint.files.iter().rev() {
+            let ok = match original {
+                Some(bytes) => std::fs::write(path, bytes).is_ok(),
+                None => std::fs::remove_file(path).is_ok() || !path.exists(),
+            };
+            if ok {
+                restored.push(self.ws.rel(path));
+            }
+        }
+        restored.reverse();
+        self.repair();
+        self.messages.push(Message::user(format!(
+            "(I undid the file changes from my request \"{}\": {} are back to how they were before. Shell commands \
+             were not undone.)",
+            checkpoint.label,
+            restored.join(", ")
+        )));
+        self.save();
+        Some((checkpoint.label, restored))
+    }
+
     async fn execute(&mut self, call: &ToolCall, tx: &Events, plan: bool) -> String {
         let name = call.function.name.as_str();
         let args = call.args();
@@ -332,10 +410,51 @@ impl Agent {
                 Err(e) => format!("Error: invalid todos: {e}"),
             };
         }
+        if name == "view_image" {
+            let summary = tools::summary(name, &args);
+            let _ = tx.send(AgentEvent::ToolStart { summary: summary.clone() });
+            let question = args["question"].as_str().unwrap_or("Describe the image.");
+            let (output, ok) = match self.ws.resolve(args["path"].as_str().unwrap_or("")) {
+                Ok(path) => match self.look_at(&path, question, tx).await {
+                    Ok(text) => (text, true),
+                    Err(e) => (format!("Error: {e:#}"), false),
+                },
+                Err(e) => (format!("Error: {e}"), false),
+            };
+            let _ = tx.send(AgentEvent::ToolDone { name: name.into(), summary, output: output.clone(), ok });
+            return output;
+        }
         if plan && tools::mutates(name) {
             return "Plan mode is on, so this action is not available. Finish your plan instead.".into();
         }
 
+        if let Some(rest) = name.strip_prefix("mcp__") {
+            let summary = rest.replacen("__", ": ", 1);
+            if plan {
+                return "Plan mode is on, so MCP tools are not available. Finish your plan instead.".into();
+            }
+            if self.mode.get() != Mode::Auto && !self.always_tools.contains(name) {
+                let preview = Some(serde_json::to_string_pretty(&args).unwrap_or_default());
+                match ask(tx, format!("Call MCP tool {summary}"), preview, Some(format!("`{summary}` calls"))).await {
+                    Decision::Yes => {}
+                    Decision::Always => {
+                        self.always_tools.insert(name.to_string());
+                    }
+                    Decision::No => {
+                        let _ = tx.send(AgentEvent::ToolDone { name: name.into(), summary, output: "Denied by user".into(), ok: false });
+                        return "The user declined this action. Stop and ask them how they would like to proceed.".into();
+                    }
+                }
+            }
+            let _ = tx.send(AgentEvent::ToolStart { summary: summary.clone() });
+            let (output, ok) = match self.mcp.call(name, args.clone()).await {
+                Ok(out) => (out, true),
+                Err(e) => (format!("Error: {e:#}"), false),
+            };
+            let _ = tx.send(AgentEvent::ToolDone { name: name.into(), summary, output: output.clone(), ok });
+            debug_log(name, &args, &output);
+            return output;
+        }
         let summary = tools::summary(name, &args);
         let command = args["command"].as_str().unwrap_or("");
         let prefix = (name == "bash").then(|| command_prefix(command)).flatten();
@@ -368,6 +487,7 @@ impl Agent {
                 }
             }
         }
+        self.snapshot(name, &args);
         let _ = tx.send(AgentEvent::ToolStart { summary: summary.clone() });
         let (output, ok) = match tools::run(&self.ws, name, &args).await {
             Ok(out) => (out, true),
@@ -376,6 +496,67 @@ impl Agent {
         let _ = tx.send(AgentEvent::ToolDone { name: name.into(), summary, output: output.clone(), ok });
         debug_log(name, &args, &output);
         output
+    }
+
+    async fn look_at(&self, path: &Path, request: &str, tx: &Events) -> Result<String> {
+        let model = vision_model();
+        let (text, usage) = crate::vision::describe(&self.client, &model, path, request).await?;
+        let _ = tx.send(AgentEvent::Usage { model, prompt: usage.prompt_tokens, completion: usage.completion_tokens });
+        Ok(text)
+    }
+
+    /// Describe images the user attached, as text blocks to append to their message.
+    pub async fn describe_images(&self, images: &[PathBuf], request: &str, tx: &Events) -> String {
+        let mut out = String::new();
+        for path in images {
+            let rel = self.ws.rel(path);
+            let summary = format!("Look at {rel}");
+            let _ = tx.send(AgentEvent::ToolStart { summary: summary.clone() });
+            match self.look_at(path, request, tx).await {
+                Ok(text) => {
+                    let _ = tx.send(AgentEvent::ToolDone { name: "view_image".into(), summary, output: text.clone(), ok: true });
+                    out.push_str(&format!("\n\n<image path=\"{rel}\" described-by=\"Nemotron VL\">\n{text}\n</image>"));
+                }
+                Err(e) => {
+                    let _ = tx.send(AgentEvent::ToolDone { name: "view_image".into(), summary, output: format!("{e:#}"), ok: false });
+                }
+            }
+        }
+        out
+    }
+
+    /// Review uncommitted changes with `model` (the reasoning tier). The review joins the conversation,
+    /// so the user can follow up with "fix the first issue".
+    pub async fn review(&mut self, model: &str, tx: &Events) -> Result<()> {
+        let material = crate::git::review_material(&self.ws.root).await?;
+        if material.trim().is_empty() {
+            let _ = tx.send(AgentEvent::Notice("No uncommitted changes to review.".into()));
+            return Ok(());
+        }
+        self.repair();
+        self.messages.push(Message::user(format!(
+            "Review my uncommitted changes as a careful senior engineer. Report, most severe first: bugs and \
+             correctness problems, security issues, missing error handling or tests, then smaller suggestions. \
+             Number the findings, cite file and line where you can, and be concrete. Don't restate what the diff \
+             does. If it looks good, say so briefly.\n\n{material}"
+        )));
+        let resp = self
+            .client
+            .stream(
+                &Request { model: model.to_string(), messages: self.messages.clone(), max_tokens: Some(8192), ..Default::default() },
+                |delta| {
+                    let _ = tx.send(match delta {
+                        Delta::Text(t) => AgentEvent::Text(t.to_string()),
+                        Delta::Reasoning(r) => AgentEvent::Reasoning(r.to_string()),
+                    });
+                },
+            )
+            .await?;
+        let _ = tx.send(AgentEvent::Usage { model: model.into(), prompt: resp.usage.prompt_tokens, completion: resp.usage.completion_tokens });
+        let _ = tx.send(AgentEvent::Reply { content: resp.content.clone(), thought_secs: None });
+        self.messages.push(Message::assistant(resp.content, vec![]));
+        self.save();
+        Ok(())
     }
 
     /// Replace the conversation so far with a summary, to free up context.
@@ -469,7 +650,9 @@ pub fn system_prompt(root: &Path) -> String {
          - After changing code, build or run the relevant tests with bash and fix what you broke.\n\
          - Mutating actions ask the user for approval. If they decline, stop and ask how to proceed.\n\
          - Do not commit, push, or delete files unless asked.\n\
-         - Files the user mentions with @path are attached to their message.\n\n\
+         - Files the user mentions with @path are attached to their message; images arrive as descriptions written \
+           by a vision model, and you can look at other images with view_image.\n\
+         - Use web_fetch (and web_search when available) for documentation or errors you don't know; cite URLs you used.\n\n\
          # How to communicate\n\
          - Be concise and direct. Use Markdown; put code, commands and paths in backticks.\n\
          - When you finish a task, briefly say what you changed and how you verified it, including anything \

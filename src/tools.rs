@@ -97,6 +97,23 @@ pub fn specs(read_only: bool) -> Vec<ToolSpec> {
                 "required": ["pattern"]}),
         ),
     ];
+    specs.push(ToolSpec::new(
+        "web_fetch",
+        "Fetch a web page (documentation, an issue, a changelog) and return its readable text.",
+        json!({"type": "object", "properties": {"url": {"type": "string", "description": "http(s) URL"}}, "required": ["url"]}),
+    ));
+    if crate::web::search_available() {
+        specs.push(ToolSpec::new(
+            "web_search",
+            "Search the web (via Tavily) for current information: library docs, error messages, release notes, APIs. \
+             Returns a short summary and the top results with URLs; follow up with web_fetch to read one.",
+            json!({"type": "object", "properties": {
+                "query": {"type": "string"},
+                "topic": {"type": "string", "enum": ["general", "news", "finance"]},
+                "max_results": {"type": "integer", "description": "1-10, default 5"}},
+                "required": ["query"]}),
+        ));
+    }
     if !read_only {
         specs.extend([
             ToolSpec::new(
@@ -145,6 +162,9 @@ pub fn summary(name: &str, args: &Value) -> String {
         "edit_file" => format!("Edit {}", s(args, "path")),
         "write_file" => format!("Write {}", s(args, "path")),
         "bash" => format!("Run `{}`", one_line(s(args, "command"), 100)),
+        "web_search" => format!("Web search \"{}\"", one_line(s(args, "query"), 80)),
+        "web_fetch" => format!("Fetch {}", one_line(s(args, "url"), 100)),
+        "view_image" => format!("Look at {}", s(args, "path")),
         other => other.to_string(),
     }
 }
@@ -184,6 +204,8 @@ pub async fn run(ws: &Workspace, name: &str, args: &Value) -> Result<String, Str
         "grep" => grep(ws, args),
         "edit_file" => edit_file(ws, args),
         "write_file" => write_file(ws, args),
+        "web_search" => crate::web::search(args).await,
+        "web_fetch" => crate::web::fetch(args).await,
         "bash" => {
             let timeout = args["timeout_secs"].as_u64().unwrap_or(120).clamp(1, 900);
             let out = run_command(&ws.root, s(args, "command"), Duration::from_secs(timeout)).await;

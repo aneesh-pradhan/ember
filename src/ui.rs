@@ -41,10 +41,17 @@ const COMMANDS: &[(&str, &str, bool)] = &[
     ("model", "show or switch the Nemotron model: nano, super, ultra, or an id", true),
     ("models", "list the Nemotron models available to your API key", false),
     ("resume", "list saved conversations here; /resume <n> continues one", true),
+    ("undo", "restore the files ember changed in its last turn", false),
+    ("review", "have Nemotron Ultra review your uncommitted changes", false),
+    ("commit", "draft a commit message from your changes and commit on approval", true),
+    ("branch", "create and switch to a well-named branch for the described work", true),
+    ("pr", "draft a pull request; push and open it with gh on approval", false),
+    ("resolve", "work through merge conflicts in the repository", false),
     ("compact", "summarize the conversation so far to free up context", false),
     ("clear", "start a new conversation", false),
     ("diff", "show uncommitted changes (git diff)", false),
     ("todos", "show the current task list", false),
+    ("mcp", "show connected MCP servers and their tools", false),
     ("usage", "token usage per model this session", false),
     ("help", "show commands and keys", false),
     ("quit", "exit ember", false),
@@ -73,9 +80,12 @@ pub struct App {
     fix: Option<FixView>,
     todos: Vec<Todo>,
     context: Option<(u64, u64)>,
+    git: Option<(String, usize)>,
     files: Option<Vec<String>>,
     popup_sel: usize,
     popup_token: String,
+    /// Suggestions closed with Esc stay closed until the token being completed changes.
+    popup_dismissed: bool,
     usage: BTreeMap<String, (u64, u64)>,
     /// Everything printed so far, unwrapped.
     transcript: Vec<Line<'static>>,
@@ -118,6 +128,8 @@ pub async fn run(config: Config, cwd: PathBuf, mode: Mode, initial: Option<Strin
     let model = Arc::new(Mutex::new(config.coder.clone()));
     let mode = SharedMode::new(mode);
     let agent = Agent::new(client.clone(), model.clone(), mode.clone(), Workspace::new(cwd.clone()));
+    let (mcp, mcp_cwd) = (agent.mcp.clone(), cwd.clone());
+    tokio::spawn(async move { mcp.start(&mcp_cwd).await });
     let mut app = App {
         config,
         client,
@@ -136,9 +148,11 @@ pub async fn run(config: Config, cwd: PathBuf, mode: Mode, initial: Option<Strin
         fix: None,
         todos: vec![],
         context: None,
+        git: None,
         files: None,
         popup_sel: 0,
         popup_token: String::new(),
+        popup_dismissed: false,
         usage: BTreeMap::new(),
         transcript: vec![],
         wrapped: vec![],
@@ -191,7 +205,12 @@ impl App {
                     None => return Ok(()),
                 },
                 Some(msg) = rx.recv() => self.on_agent(msg),
-                _ = tick.tick() => self.frame = self.frame.wrapping_add(1),
+                _ = tick.tick() => {
+                    self.frame = self.frame.wrapping_add(1);
+                    if self.frame % 30 == 1 {
+                        self.git = crate::git::status(&self.cwd);
+                    }
+                }
             }
         }
     }
@@ -222,7 +241,7 @@ impl App {
         let model = self.config.coder.clone();
         let cwd = self.short_cwd();
         self.print(logo::banner(&model, &cwd));
-        if self.config.api_key.is_none() {
+        if self.config.api_key.is_none() && self.config.base_url.contains("nebius.com") {
             self.print_line(Line::styled(
                 "  ! NEBIUS_API_KEY is not set. Add it to .env or ~/.config/ember/env, then restart.",
                 theme::err(),
@@ -299,6 +318,10 @@ impl App {
                     }
                 } else if !ok {
                     self.print_line(Line::styled(format!("    {}", tools::one_line(&output, 200)), theme::err()));
+                } else if name == "view_image" {
+                    for line in output.lines().filter(|l| !l.trim().is_empty()).take(4) {
+                        self.print_line(Line::styled(format!("    │ {}", tools::one_line(line, 140)), theme::dim()));
+                    }
                 } else if name == "edit_file" || (name == "write_file" && output.starts_with("---")) {
                     self.print_diff(&output, 30);
                 } else {
@@ -311,12 +334,18 @@ impl App {
                     if preview.starts_with("---") {
                         self.print_line(Line::styled(format!("  ◇ {}", req.summary), theme::bold()));
                         self.print_diff(preview, 60);
+                    } else if preview.starts_with('{') {
+                        self.print_line(Line::styled(format!("  ◇ {}", req.summary), theme::bold()));
+                        for line in preview.lines().take(20) {
+                            self.print_line(Line::styled(format!("    │ {line}"), theme::dim()));
+                        }
                     } else {
                         self.print_line(Line::styled(format!("  ◇ $ {preview}"), theme::bold()));
                     }
                 }
                 self.approval = Some(req);
                 self.approval_sel = 0;
+                self.live_tool = None;
             }
             AgentEvent::Usage { model, prompt, completion } => {
                 let entry = self.usage.entry(model).or_default();
@@ -334,6 +363,7 @@ impl App {
                 self.print_line(Line::styled(format!("  ✗ {err}"), theme::err()));
             }
             AgentEvent::Done => {
+                self.git = crate::git::status(&self.cwd);
                 if !self.live_text.trim().is_empty() {
                     let text = std::mem::take(&mut self.live_text);
                     self.print(markdown::render(&text));
@@ -453,6 +483,7 @@ impl App {
         if token != self.popup_token {
             self.popup_token = token;
             self.popup_sel = 0;
+            self.popup_dismissed = false;
         }
     }
 
@@ -498,6 +529,7 @@ impl App {
             KeyCode::Up => self.popup_sel = (self.popup_sel + n - 1) % n,
             KeyCode::Down => self.popup_sel = (self.popup_sel + 1) % n,
             KeyCode::Tab => self.accept(&popup, false),
+            KeyCode::Esc => self.popup_dismissed = true,
             KeyCode::Enter if key.modifiers.is_empty() => {
                 let (label, _) = &popup.items[self.popup_sel.min(n - 1)];
                 if popup.kind == PopupKind::Command && label == self.input.text() {
@@ -514,7 +546,8 @@ impl App {
         let (label, _) = &popup.items[self.popup_sel.min(popup.items.len() - 1)];
         match popup.kind {
             PopupKind::Command => {
-                let takes_arg = COMMANDS.iter().any(|(name, _, arg)| *arg && label[1..] == **name);
+                let is_custom = !COMMANDS.iter().any(|(name, _, _)| label[1..] == **name);
+                let takes_arg = is_custom || COMMANDS.iter().any(|(name, _, arg)| *arg && label[1..] == **name);
                 if takes_arg {
                     self.input.set(&format!("{label} "));
                 } else if enter {
@@ -636,42 +669,59 @@ impl App {
             return;
         }
         self.print_user(&text);
-        let (prompt, attached) = self.attach_mentions(&text);
+        let (prompt, attached, images) = self.attach_mentions(&text);
         for name in attached {
             self.print_notice(format!("  + attached {name}"));
         }
-        self.start_turn(prompt);
+        self.start_turn_with(prompt, images);
     }
 
     fn start_turn(&mut self, prompt: String) {
+        self.start_turn_with(prompt, vec![]);
+    }
+
+    fn start_turn_with(&mut self, prompt: String, images: Vec<PathBuf>) {
         let agent = self.agent.clone();
         let tx = self.tx.clone();
         self.spawn(async move {
             let mut agent = agent.lock().await;
-            if let Err(e) = agent.turn(prompt, &tx).await {
+            let described = agent.describe_images(&images, &prompt, &tx).await;
+            if let Err(e) = agent.turn(prompt + &described, &tx).await {
                 let _ = tx.send(AgentEvent::Error(format!("{e:#}")));
             }
         });
     }
 
-    /// Append the contents of files mentioned as @path to the prompt.
-    fn attach_mentions(&self, text: &str) -> (String, Vec<String>) {
+    /// Attach files mentioned as @path (and image paths dropped into the terminal). Text files are inlined;
+    /// images are returned separately for the vision model to describe.
+    fn attach_mentions(&self, text: &str) -> (String, Vec<String>, Vec<PathBuf>) {
         let ws = Workspace::new(self.cwd.clone());
         let mut prompt = text.to_string();
-        let mut attached = vec![];
+        let mut attached: Vec<String> = vec![];
+        let mut images: Vec<PathBuf> = vec![];
         for word in text.split_whitespace() {
-            let Some(path) = word.strip_prefix('@') else { continue };
-            let path = path.trim_end_matches([',', '.', ')', ':', ';', '?', '!']);
-            let Ok(abs) = ws.resolve(path) else { continue };
-            let small = abs.metadata().is_ok_and(|m| m.is_file() && m.len() <= MAX_ATTACHMENT);
-            if !small || attached.iter().any(|(p, _): &(String, usize)| p == path) {
+            let mention = word.strip_prefix('@');
+            let raw = mention.unwrap_or(word).trim_matches(['\'', '"']).trim_end_matches(['.', ',', ')', ':', ';', '?', '!']);
+            let raw = raw.replace("\\ ", " ");
+            // Text attachments must be inside the project; images may come from anywhere (e.g. a dragged screenshot).
+            let inside = ws.resolve(&raw).ok();
+            let Some(abs) = inside.clone().or_else(|| Some(PathBuf::from(&raw)).filter(|p| p.is_absolute())) else { continue };
+            if !abs.is_file() || attached.iter().any(|a| a.starts_with(raw.as_str())) {
+                continue;
+            }
+            if crate::vision::is_image(&abs) {
+                images.push(abs);
+                attached.push(format!("{raw} (image, read by Nemotron VL)"));
+                continue;
+            }
+            if mention.is_none() || inside.is_none() || abs.metadata().map_or(true, |m| m.len() > MAX_ATTACHMENT) {
                 continue;
             }
             let Ok(content) = std::fs::read_to_string(&abs) else { continue };
-            prompt.push_str(&format!("\n\n<file path=\"{path}\">\n{content}\n</file>"));
-            attached.push((path.to_string(), content.lines().count()));
+            prompt.push_str(&format!("\n\n<file path=\"{raw}\">\n{content}\n</file>"));
+            attached.push(format!("{raw} ({} lines)", content.lines().count()));
         }
-        (prompt, attached.into_iter().map(|(p, n)| format!("{p} ({n} lines)")).collect())
+        (prompt, attached, images)
     }
 
     /// `!command`: run it directly in the user's shell and add the output to the conversation.
@@ -712,6 +762,107 @@ impl App {
             "todos" => self.print_todos(),
             "diff" => self.print_git_diff(),
             "resume" => self.resume(arg),
+            "mcp" => {
+                let agent = self.agent.clone();
+                let Ok(agent) = agent.try_lock() else {
+                    self.print_notice("ember is busy; try /mcp again in a moment");
+                    return;
+                };
+                let status = agent.mcp.status();
+                let tools: Vec<String> = agent.mcp.specs().into_iter().map(|t| t.function.name).collect();
+                drop(agent);
+                if status.is_empty() {
+                    self.print_notice("No MCP servers configured. Add them to .ember/mcp.json or ~/.config/ember/mcp.json:");
+                    self.print_notice(r#"  {"mcpServers": {"name": {"command": "npx", "args": ["-y", "some-mcp-server"]}}}"#);
+                    return;
+                }
+                self.print_line(Line::default());
+                for line in status {
+                    let style = if line.starts_with('✓') { theme::ok() } else { theme::err() };
+                    self.print_line(Line::styled(format!("  {line}"), style));
+                }
+                for t in tools {
+                    self.print_notice(format!("    {t}"));
+                }
+            }
+            "review" => {
+                if self.busy() {
+                    return;
+                }
+                self.print_user("/review");
+                let (agent, tx, model) = (self.agent.clone(), self.tx.clone(), self.config.reasoner.clone());
+                self.spawn(async move {
+                    let _ = tx.send(AgentEvent::ToolStart { summary: "Reviewing your changes with Nemotron Ultra".into() });
+                    if let Err(e) = agent.lock().await.review(&model, &tx).await {
+                        let _ = tx.send(AgentEvent::Error(format!("review failed: {e:#}")));
+                    }
+                });
+            }
+            "commit" | "branch" | "pr" => {
+                if self.busy() {
+                    return;
+                }
+                self.print_user(&format!("/{line}"));
+                let (client, tx, cwd, model) = (self.client.clone(), self.tx.clone(), self.cwd.clone(), self.config.coder.clone());
+                let (kind, arg) = (name.to_string(), arg.to_string());
+                self.spawn(async move {
+                    let result = match kind.as_str() {
+                        "commit" => crate::git::commit(client, model, &cwd, arg, tx.clone()).await,
+                        "branch" => crate::git::branch(client, model, &cwd, arg, tx.clone()).await,
+                        _ => crate::git::pr(client, model, &cwd, tx.clone()).await,
+                    };
+                    if let Err(e) = result {
+                        let _ = tx.send(AgentEvent::Error(format!("/{kind}: {e:#}")));
+                    }
+                });
+            }
+            "resolve" => {
+                if self.busy() {
+                    return;
+                }
+                let cwd = self.cwd.clone();
+                let files = std::process::Command::new("git")
+                    .args(["diff", "--name-only", "--diff-filter=U"])
+                    .current_dir(&cwd)
+                    .output()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .unwrap_or_default();
+                if files.is_empty() {
+                    self.print_notice("No merge conflicts to resolve.");
+                    return;
+                }
+                self.print_user("/resolve");
+                self.start_turn(format!(
+                    "These files have merge conflicts:\n{files}\n\nFor each one, read it, understand what both sides \
+                     intended (use `git log` on the conflicting branches if helpful), and edit the file to a correct \
+                     merged version with no conflict markers left. Then build or run the tests, and summarize how you \
+                     resolved each conflict. Do not commit; leave staging the result to me."
+                ));
+            }
+            "undo" => {
+                if self.busy() {
+                    return;
+                }
+                let agent = self.agent.clone();
+                let undone = match agent.try_lock() {
+                    Ok(mut agent) => agent.undo(),
+                    Err(_) => return,
+                };
+                match undone {
+                    Some((label, files)) => {
+                        self.print_line(Line::default());
+                        self.print_line(Line::from(vec![
+                            Span::styled("  ↶ Undid ", theme::accent()),
+                            Span::styled(format!("\"{label}\""), theme::bold()),
+                        ]));
+                        for f in files {
+                            self.print_notice(format!("  restored {f}"));
+                        }
+                        self.print_notice("  (shell commands from that turn were not undone)");
+                    }
+                    None => self.print_notice("Nothing to undo: ember hasn't changed any files in this conversation."),
+                }
+            }
             "clear" | "new" => {
                 if self.busy() {
                     return;
@@ -780,7 +931,21 @@ impl App {
                     });
                 }
             }
-            other => self.print_notice(format!("Unknown command /{other}. Try /help")),
+            other => match crate::commands::load(&self.cwd).into_iter().find(|c| c.name == other) {
+                Some(custom) => {
+                    if self.busy() {
+                        return;
+                    }
+                    let prompt = custom.expand(arg);
+                    self.print_user(&format!("/{line}"));
+                    let (prompt, attached, images) = self.attach_mentions(&prompt);
+                    for name in attached {
+                        self.print_notice(format!("  + attached {name}"));
+                    }
+                    self.start_turn_with(prompt, images);
+                }
+                None => self.print_notice(format!("Unknown command /{other}. Try /help")),
+            },
         }
     }
 
@@ -875,6 +1040,17 @@ impl App {
             let label = if *arg { format!("/{name} …") } else { format!("/{name}") };
             lines.push(Line::from(vec![Span::styled(format!("    {label:<12}"), theme::accent()), Span::styled(*desc, theme::dim())]));
         }
+        let custom = crate::commands::load(&self.cwd);
+        if !custom.is_empty() {
+            lines.push(Line::styled("  Custom commands", theme::bold()));
+            for c in custom {
+                lines.push(Line::from(vec![
+                    Span::styled(format!("    /{:<11}", c.name), theme::accent()),
+                    Span::styled(c.description, theme::dim()),
+                ]));
+            }
+        }
+        lines.push(Line::styled("  Add your own: .ember/commands/<name>.md in a project, or ~/.config/ember/commands/.", theme::dim()));
         lines.push(Line::styled("  Input", theme::bold()));
         for (key, desc) in [
             ("@path", "attach a file to your message (Tab completes)"),
@@ -907,22 +1083,25 @@ impl App {
     // ------------------------------------------------------------- drawing
 
     fn popup(&self) -> Option<Popup> {
-        if self.task.is_some() || self.approval.is_some() {
+        if self.task.is_some() || self.approval.is_some() || self.popup_dismissed {
             return None;
         }
         let text = self.input.text();
         if let Some(query) = text.strip_prefix('/').filter(|q| !q.contains(char::is_whitespace)) {
-            let mut items: Vec<(String, String)> = COMMANDS
-                .iter()
-                .filter(|(name, _, _)| name.starts_with(query))
-                .map(|(name, desc, _)| (format!("/{name}"), desc.to_string()))
-                .collect();
+            let mut all: Vec<(String, String)> =
+                COMMANDS.iter().map(|(name, desc, _)| (name.to_string(), desc.to_string())).collect();
+            for custom in crate::commands::load(&self.cwd) {
+                if !all.iter().any(|(n, _)| *n == custom.name) {
+                    let scope = if custom.project { "project" } else { "custom" };
+                    all.push((custom.name, format!("({scope}) {}", custom.description)));
+                }
+            }
+            let pick = |m: &dyn Fn(&str) -> bool| -> Vec<(String, String)> {
+                all.iter().filter(|(n, _)| m(n)).map(|(n, d)| (format!("/{n}"), d.clone())).collect()
+            };
+            let mut items = pick(&|n: &str| n.starts_with(query));
             if items.is_empty() {
-                items = COMMANDS
-                    .iter()
-                    .filter(|(name, _, _)| name.contains(query))
-                    .map(|(name, desc, _)| (format!("/{name}"), desc.to_string()))
-                    .collect();
+                items = pick(&|n: &str| n.contains(query));
             }
             return (!items.is_empty()).then_some(Popup { kind: PopupKind::Command, start: 0, items });
         }
@@ -1050,7 +1229,7 @@ impl App {
         let options = approval_options(req);
         let sel = self.approval_sel.min(options.len() - 1);
         let mut lines = vec![
-            Line::from(vec![Span::styled("Allow ", theme::bold()), Span::styled(format!("{}?", req.summary), theme::bold())]),
+            Line::styled(format!("{}?", req.summary), theme::bold()),
             Line::default(),
         ];
         for (i, (_, label)) in options.iter().enumerate() {
@@ -1088,6 +1267,12 @@ impl App {
             Mode::Plan => vec![Span::styled(" ⏸ plan mode on", theme::info())],
             Mode::Ask => vec![Span::styled(" ? /help", theme::dim())],
         };
+        if let Some((branch, changed)) = &self.git {
+            left.push(Span::styled(format!(" · ⎇ {branch}"), theme::code()));
+            if *changed > 0 {
+                left.push(Span::styled(format!(" ±{changed}"), theme::dim()));
+            }
+        }
         let hints = " · shift+tab mode · / commands · @ files · ! shell";
         let room = (area.width as usize).saturating_sub(right.width() + 2);
         if Line::from(left.clone()).width() + hints.chars().count() <= room {
