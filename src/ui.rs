@@ -28,7 +28,7 @@ use crate::input::Input;
 use crate::llm::Client;
 use crate::session;
 use crate::tools::{self, Workspace};
-use crate::{logo, markdown, theme};
+use crate::{animation, logo, markdown, theme};
 
 const MAX_ATTACHMENT: u64 = 200_000;
 
@@ -53,6 +53,7 @@ const COMMANDS: &[(&str, &str, bool)] = &[
     ("todos", "show the current task list", false),
     ("think", "set Nemotron's reasoning for the agent: on, low or off", true),
     ("theme", "switch ember's look: kawaii (pastel, sparkles, kaomoji) or classic", true),
+    ("animation", "turn ember's small animations on or off: /animation on, /animation off", true),
     ("mcp", "show connected MCP servers and their tools", false),
     ("usage", "token usage per model this session", false),
     ("help", "show commands and keys", false),
@@ -105,6 +106,7 @@ pub struct App {
     frame: usize,
     quit: bool,
     last_ctrl_c: Option<Instant>,
+    motion: animation::Motion,
 }
 
 #[derive(Default)]
@@ -180,6 +182,7 @@ pub async fn run(
         frame: 0,
         quit: false,
         last_ctrl_c: None,
+        motion: animation::Motion::new(Instant::now()),
     };
 
     let mut terminal = ratatui::init();
@@ -390,6 +393,7 @@ impl App {
             AgentEvent::Notice(text) => self.print_line(Line::styled(format!("  {text}"), theme::info())),
             AgentEvent::Fix(ev) => self.on_fix(ev),
             AgentEvent::Error(err) => {
+                self.motion.flash_error();
                 self.reaction = Some((theme::Mood::Sad, Instant::now()));
                 let face = theme::face(theme::Mood::Sad).map(|f| format!("  {f}")).unwrap_or_default();
                 self.print_line(Line::styled(format!("  {} {err}{face}", theme::glyphs().failed), theme::err()));
@@ -409,6 +413,9 @@ impl App {
     }
 
     fn on_fix(&mut self, ev: FixEvent) {
+        if matches!(ev, FixEvent::Result { .. }) {
+            self.motion.celebrate();
+        }
         let view = self.fix.get_or_insert_with(FixView::default);
         let out = &mut self.transcript;
         match ev {
@@ -814,6 +821,7 @@ impl App {
                 }
             }
             "theme" => self.set_theme(arg),
+            "animation" => self.set_animation(arg),
             "usage" | "cost" => self.print_usage(),
             "todos" => self.print_todos(),
             "diff" => self.print_git_diff(),
@@ -1107,6 +1115,23 @@ impl App {
         self.print_notice(format!("Theme: {}{flourish}{saved}", choice.label()));
     }
 
+    /// `/animation on|off`: switch the small motions and save the choice to config.toml.
+    fn set_animation(&mut self, arg: &str) {
+        let on = match arg.trim().to_ascii_lowercase().as_str() {
+            "on" => true,
+            "off" => false,
+            _ => {
+                let state = if self.motion.active() { "on" } else { "off" };
+                self.print_notice(format!("Animations are {state}. Use /animation on or /animation off."));
+                return;
+            }
+        };
+        self.motion.set_enabled(on);
+        let saved = animation::save_enabled(on).map_or_else(|e| format!(" (couldn't save it: {e})"), |_| String::new());
+        let muted = if on && self.motion.muted() { " (still off in this terminal: CI, NO_COLOR, EMBER_REDUCED_MOTION or no TTY)" } else { "" };
+        self.print_notice(format!("Animations {}{saved}{muted}", if on { "on" } else { "off" }));
+    }
+
     /// The mascot's mood for the working indicator: a recent reaction wins for a few seconds, then what it's doing.
     fn mood(&self, elapsed: u64) -> theme::Mood {
         match self.reaction {
@@ -1203,6 +1228,7 @@ impl App {
     }
 
     fn draw(&mut self, f: &mut Frame) {
+        self.motion.tick(Instant::now());
         let popup = self.popup();
         let prompt_height = match &self.approval {
             Some(req) => 4 + approval_options(req).len() as u16,
@@ -1223,6 +1249,7 @@ impl App {
             Some(p) => Paragraph::new(self.popup_lines(&p, footer.height as usize, footer.width)).render(footer, f.buffer_mut()),
             None => self.render_status(f, footer),
         }
+        self.motion.twinkle(f.buffer_mut(), body);
         theme::adapt(f.buffer_mut());
     }
 
@@ -1370,6 +1397,18 @@ impl App {
                 left.push(Span::styled(format!(" ±{changed}"), theme::dim()));
             }
         }
+        let idle_face = if self.task.is_none() { self.motion.idle_face() } else { None };
+        if let Some(face) = idle_face {
+            left.insert(0, Span::styled(format!(" {face}"), theme::accent()));
+        }
+        if let Some(sparkles) = self.motion.burst() {
+            left.insert(0, Span::styled(format!(" {sparkles} "), theme::accent()));
+        }
+        if self.motion.error_flash() {
+            for span in &mut left {
+                span.style = theme::err();
+            }
+        }
         let hints = " · shift+tab mode · / commands · @ files · ! shell";
         let room = (area.width as usize).saturating_sub(right.width() + 2);
         if Line::from(left.clone()).width() + hints.chars().count() <= room {
@@ -1454,14 +1493,15 @@ impl App {
                 Span::styled(format!("  {done}/{}", self.todos.len()), theme::dim()),
             ]));
         }
-        let doing = self.live_tool.clone().unwrap_or_else(|| {
-            if self.live_reasoning.is_empty() || !self.live_text.is_empty() { "Working".into() } else { "Reasoning".into() }
-        });
+        let thinking = self.live_tool.is_none() && self.live_text.is_empty() && !self.live_reasoning.is_empty();
+        let doing = self.motion.activity(self.live_tool.as_deref(), thinking, self.frame);
         let mut status = logo::mini(self.frame, self.mood(elapsed));
-        status.extend([
-            Span::styled(tools::one_line(&doing, width as usize / 2), theme::code()),
-            Span::styled(format!("  {elapsed}s · esc to interrupt"), theme::dim()),
-        ]);
+        status.push(Span::styled(format!("{} ", self.motion.spinner(self.frame)), theme::accent()));
+        status.push(Span::styled(doing, theme::code()));
+        if let Some(step) = &self.live_tool {
+            status.push(Span::styled(format!(" {}", tools::one_line(step, width as usize / 3)), theme::dim()));
+        }
+        status.push(Span::styled(format!("  {elapsed}s · esc to interrupt"), theme::dim()));
         lines.push(Line::from(status));
         lines
     }
