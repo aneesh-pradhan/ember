@@ -574,6 +574,10 @@ impl CommandOutput {
 }
 
 /// Run `bash -c command` in `dir`, capturing stdout and stderr together.
+///
+/// The command gets its own process group. On a timeout, or when the caller stops waiting (an interrupted turn), the
+/// whole group is killed, so test runners, servers and other children don't outlive it. Background processes the
+/// command starts and leaves running (`server &`) are left alone when it finishes normally.
 pub async fn run_command(dir: &Path, command: &str, timeout: Duration) -> CommandOutput {
     let child = Command::new("bash")
         .arg("-c")
@@ -581,28 +585,64 @@ pub async fn run_command(dir: &Path, command: &str, timeout: Duration) -> Comman
         .current_dir(dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
+        .process_group(0)
         .kill_on_drop(true)
         .spawn();
     let mut child = match child {
         Ok(c) => c,
         Err(e) => return CommandOutput { code: None, output: format!("failed to start: {e}"), timed_out: false },
     };
+    let mut group = ProcessGroup(child.id());
     let mut stdout = child.stdout.take().expect("piped stdout");
     let mut buf = Vec::new();
     let result = tokio::time::timeout(timeout, async {
-        let _ = stdout.read_to_end(&mut buf).await;
-        child.wait().await
+        let mut reading = std::pin::pin!(read_all(&mut stdout, &mut buf));
+        tokio::select! {
+            _ = &mut reading => child.wait().await,
+            status = child.wait() => {
+                // bash is done, but something it started in the background may still hold the output open.
+                let _ = tokio::time::timeout(Duration::from_millis(200), reading).await;
+                status
+            }
+        }
     })
     .await;
     match result {
-        Ok(status) => CommandOutput {
-            code: status.ok().and_then(|s| s.code()),
-            output: String::from_utf8_lossy(&buf).into_owned(),
-            timed_out: false,
-        },
+        Ok(status) => {
+            group.0 = None;
+            CommandOutput {
+                code: status.ok().and_then(|s| s.code()),
+                output: String::from_utf8_lossy(&buf).into_owned(),
+                timed_out: false,
+            }
+        }
         Err(_) => {
+            drop(group);
             let _ = child.kill().await;
             CommandOutput { code: None, output: String::from_utf8_lossy(&buf).into_owned(), timed_out: true }
+        }
+    }
+}
+
+/// Read until end of file. Cancel-safe: `buf` keeps everything read before the future is dropped.
+async fn read_all(stdout: &mut tokio::process::ChildStdout, buf: &mut Vec<u8>) {
+    let mut chunk = [0u8; 8192];
+    while let Ok(n @ 1..) = stdout.read(&mut chunk).await {
+        buf.extend_from_slice(&chunk[..n]);
+    }
+}
+
+/// Kills a command's process group when dropped, unless its id was taken out first.
+struct ProcessGroup(Option<u32>);
+
+impl Drop for ProcessGroup {
+    fn drop(&mut self) {
+        if let Some(id) = self.0.and_then(|id| i32::try_from(id).ok()) {
+            // SAFETY: killpg only sends a signal. The group id is the child's pid, and a pid isn't handed out again
+            // while it's still in use as a process group id.
+            unsafe {
+                libc::killpg(id, libc::SIGKILL);
+            }
         }
     }
 }
@@ -645,6 +685,36 @@ pub fn one_line(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Whether a process is gone (or a zombie waiting to be reaped).
+    fn exited(pid: &str) -> bool {
+        let out = std::process::Command::new("ps").args(["-o", "stat=", "-p", pid]).output().unwrap();
+        !out.status.success() || String::from_utf8_lossy(&out.stdout).trim().starts_with('Z')
+    }
+
+    #[tokio::test]
+    async fn timeouts_kill_the_whole_process_group() {
+        let dir = std::env::temp_dir().join(format!("ember-pgroup-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = run_command(&dir, "sleep 30 & echo $! > child.pid; wait", Duration::from_millis(500)).await;
+        assert!(out.timed_out);
+        let pid = std::fs::read_to_string(dir.join("child.pid")).unwrap();
+        let start = std::time::Instant::now();
+        while !exited(pid.trim()) {
+            assert!(start.elapsed() < Duration::from_secs(5), "the command's child {pid} outlived the timeout");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn background_processes_dont_hold_the_command_open() {
+        let start = std::time::Instant::now();
+        let out = run_command(&std::env::temp_dir(), "sleep 3 & echo started", Duration::from_secs(20)).await;
+        assert!(!out.timed_out);
+        assert_eq!((out.code, out.output.trim()), (Some(0), "started"));
+        assert!(start.elapsed() < Duration::from_secs(2), "waited {:?} for the background sleep", start.elapsed());
+    }
 
     #[test]
     fn edit_exact_and_whitespace_tolerant() {
