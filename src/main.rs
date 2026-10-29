@@ -116,6 +116,13 @@ async fn print_mode(config: Config, cwd: std::path::PathBuf, prompt: String, yes
         let model = Arc::new(Mutex::new(config.coder.clone()));
         let mode = SharedMode::new(if yes { Mode::Auto } else { Mode::Ask });
         let mut agent = Agent::new(client, model, mode, Workspace::new(cwd.clone()));
+        let untrusted = crate::mcp::untrusted(&cwd);
+        if !untrusted.is_empty() {
+            eprintln!(
+                "[note] Not starting the MCP servers in .ember/mcp.json ({}): run ember here and use /mcp trust if you trust this repository",
+                untrusted.iter().map(|(name, command)| format!("{name}: {command}")).collect::<Vec<_>>().join("; ")
+            );
+        }
         agent.mcp.clone().start(&cwd).await;
         *agent.think.lock().unwrap() = think;
         tokio::spawn(async move { agent.turn(prompt, &tx).await })

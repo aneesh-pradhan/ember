@@ -35,7 +35,7 @@ pub fn file() -> Option<PathBuf> {
     crate::config::user_env_file()?.parent().map(|dir| dir.join("permissions.json"))
 }
 
-fn key(root: &Path) -> String {
+pub fn key(root: &Path) -> String {
     root.canonicalize().unwrap_or_else(|_| root.to_path_buf()).display().to_string()
 }
 
