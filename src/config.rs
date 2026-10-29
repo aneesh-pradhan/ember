@@ -101,6 +101,16 @@ impl Config {
         crate::llm::Client::new(&self.base_url, self.api_key.clone()).with_think_budget(self.think_budget)
     }
 
+    /// What a call cost in USD on Token Factory, or None for other servers and models without a known price.
+    pub fn cost(&self, model: &str, prompt: u64, completion: u64, cached: u64) -> Option<f64> {
+        if !self.base_url.contains("nebius.com") {
+            return None;
+        }
+        let (input, cached_input, output) = price(model)?;
+        let fresh = prompt.saturating_sub(cached);
+        Some((fresh as f64 * input + cached as f64 * cached_input + completion as f64 * output) / 1e6)
+    }
+
     pub fn model(&self, tier: Tier) -> &str {
         match tier {
             Tier::Fast => &self.fast,
@@ -113,6 +123,23 @@ impl Config {
 /// The vision model used to look at images (Nemotron VL).
 pub fn vision_model() -> String {
     env::var("EMBER_MODEL_VISION").ok().filter(|v| !v.is_empty()).unwrap_or_else(|| "nvidia/Nemotron-3.5-Super-VL".into())
+}
+
+/// Token Factory list prices in USD per 1M tokens: input, cached input, output (eu-north1, Oct 2026; the same table
+/// as bench/run.py). Cached input is 5x cheaper on Super, which is why ember keeps every request a prefix extension.
+fn price(model: &str) -> Option<(f64, f64, f64)> {
+    match model.to_ascii_lowercase().as_str() {
+        "nvidia/nemotron-3-super-120b-a12b" => Some((0.30, 0.06, 0.90)),
+        "nvidia/nemotron-3-ultra-550b-a55b" => Some((1.00, 0.12, 3.00)),
+        "nvidia/nvidia-nemotron-3-nano-30b-a3b" => Some((0.06, 0.012, 0.24)),
+        "nvidia/nemotron-3_5-lightning" => Some((0.06, 0.03, 0.24)),
+        _ => None,
+    }
+}
+
+/// A dollar amount for the status bar and /usage: tenths of a cent while it's small.
+pub fn format_cost(usd: f64) -> String {
+    if usd < 1.0 { format!("${usd:.3}") } else { format!("${usd:.2}") }
 }
 
 /// Context window size in tokens for a model id (from the Token Factory catalog; conservative default).
@@ -134,4 +161,35 @@ pub fn user_env_file() -> Option<PathBuf> {
         .filter(|p| p.is_absolute())
         .or_else(|| dirs::home_dir().map(|h| h.join(".config")))?;
     Some(base.join("ember").join("env"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(base_url: &str) -> Config {
+        Config {
+            api_key: None,
+            base_url: base_url.into(),
+            fast: String::new(),
+            coder: String::new(),
+            reasoner: String::new(),
+            draft: String::new(),
+            fix_branches: 3,
+            test_cmd: None,
+            think_budget: None,
+        }
+    }
+
+    #[test]
+    fn prices_calls_at_token_factory_rates() {
+        let tf = config(DEFAULT_BASE_URL);
+        // 100k input of which 80k cached, 2k output on Super: 20k × $0.30 + 80k × $0.06 + 2k × $0.90 per 1M.
+        let cost = tf.cost("nvidia/nemotron-3-super-120b-a12b", 100_000, 2_000, 80_000).unwrap();
+        assert!((cost - 0.0126).abs() < 1e-9, "{cost}");
+        assert!(tf.cost("nvidia/Nemotron-3-Ultra-550b-a55b", 1_000_000, 0, 0).is_some_and(|c| (c - 1.0).abs() < 1e-9));
+        assert_eq!(tf.cost("nvidia/Nemotron-3.5-Super-VL", 1000, 10, 0), None, "unknown price");
+        assert_eq!(config("http://localhost:8000/v1/").cost("nvidia/nemotron-3-super-120b-a12b", 1000, 10, 0), None, "self-hosted");
+        assert_eq!((format_cost(0.0126), format_cost(12.345)), ("$0.013".to_string(), "$12.35".to_string()));
+    }
 }
