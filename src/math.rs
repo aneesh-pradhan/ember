@@ -7,6 +7,12 @@
 
 use std::borrow::Cow;
 
+use unicode_width::UnicodeWidthStr;
+
+/// Around the contents of `\boxed{…}` in `tex_to_unicode`'s output, until it's placed as display or inline math.
+const BOX_OPEN: char = '\u{1}';
+const BOX_CLOSE: char = '\u{2}';
+
 /// Replace every math region in `markdown` with readable Unicode. Unclosed delimiters (a reply still streaming) are
 /// left as they are.
 pub fn render_math(markdown: &str) -> Cow<'_, str> {
@@ -53,11 +59,11 @@ fn convert_prose(text: &str) -> String {
             continue;
         }
         if let Some((math, display, len)) = math_at(rest, &out) {
-            let converted = escape(&tex_to_unicode(math));
+            let converted = tex_to_unicode(math);
             if display {
                 place_display(&mut out, &converted);
             } else {
-                out.push_str(&converted);
+                out.push_str(&emphasize_boxes(&escape(&converted)));
             }
             rest = &rest[len..];
             continue;
@@ -101,13 +107,26 @@ fn math_at<'a>(text: &'a str, before: &str) -> Option<(&'a str, bool, usize)> {
     Some((math, false, 1 + end + 1))
 }
 
-/// Display math on lines of its own, indented, with hard breaks so neighbouring lines don't run into it.
+/// Display math on lines of its own, indented, with hard breaks so neighbouring lines don't run into it. A line that
+/// is all one `\boxed{…}` gets a box drawn around it.
 fn place_display(out: &mut String, converted: &str) {
     const INDENT: &str = "\u{a0}\u{a0}"; // non-breaking spaces: Markdown would strip ordinary leading spaces
     if !out.is_empty() && !out.ends_with('\n') {
         out.push_str("  \n");
     }
-    let lines: Vec<&str> = converted.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let mut lines = vec![];
+    for line in converted.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let boxed = line.strip_prefix(BOX_OPEN).and_then(|l| l.strip_suffix(BOX_CLOSE)).filter(|l| !l.contains(BOX_OPEN));
+        match boxed {
+            Some(inner) => {
+                let rule = "─".repeat(inner.width() + 2);
+                lines.push(format!("┌{rule}┐"));
+                lines.push(format!("│ {} │", escape(inner)));
+                lines.push(format!("└{rule}┘"));
+            }
+            None => lines.push(emphasize_boxes(&escape(line))),
+        }
+    }
     for (i, line) in lines.iter().enumerate() {
         if i > 0 {
             out.push_str("  \n");
@@ -116,6 +135,11 @@ fn place_display(out: &mut String, converted: &str) {
         out.push_str(line);
     }
     out.push_str("  ");
+}
+
+/// `\boxed{…}` that can't get a drawn box (inline, or part of a longer line) is shown in bold instead.
+fn emphasize_boxes(markdown: &str) -> String {
+    markdown.replace([BOX_OPEN, BOX_CLOSE], "**")
 }
 
 /// Backslash-escape what Markdown would read as formatting in converted math.
@@ -251,6 +275,7 @@ impl Converter<'_> {
         }
         let name: String = self.chars[start..self.pos].iter().collect();
         match name.as_str() {
+            "boxed" | "fbox" => format!("{BOX_OPEN}{}{BOX_CLOSE}", self.argument().trim()),
             "text" | "textrm" | "mathrm" | "textnormal" | "mathbf" | "textbf" | "mathit" | "textit" | "mathsf"
             | "mathtt" | "texttt" | "operatorname" | "mbox" | "boldsymbol" | "bm" | "mathcal" | "mathbb" => {
                 let raw = self.raw_group();
@@ -486,6 +511,10 @@ mod tests {
         assert_eq!(render_math("inline $x^2$ and \\$5"), "inline x² and \\$5");
         // Unclosed math (a reply still streaming) is left alone.
         assert_eq!(render_math("so \\[ \\Delta"), "so \\[ \\Delta");
+        // \boxed: a drawn box when it's a whole display line, bold otherwise.
+        let boxed = "Total:\n\\[ \\boxed{x = 2\\times 3} \\]\nso $\\boxed{42}$ and $$y = \\boxed{7}$$";
+        let drawn = "Total:\n\u{a0}\u{a0}┌──────────┐  \n\u{a0}\u{a0}│ x = 2× 3 │  \n\u{a0}\u{a0}└──────────┘  \nso **42** and   \n\u{a0}\u{a0}y = **7**  ";
+        assert_eq!(render_math(boxed), drawn);
         // Converted text is escaped for Markdown: subscripts can't become italics.
         assert_eq!(render_math("\\(a_{xy} * b_{xy}\\)"), "a\\_xy \\* b\\_xy");
     }
