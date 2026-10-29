@@ -18,6 +18,7 @@ from. The key is the only required setting for Token Factory.
 | `EMBER_THINK_BUDGET` | `4096` reasoning tokens per request on Token Factory, no cap elsewhere; a number, or `off` |
 | `EMBER_KEEP_REASONING` | `on`: each step's reasoning is sent back to the model for the rest of the task; `0` turns it off |
 | `EMBER_NO_WEB` | unset; `1` removes the `web_search` and `web_fetch` tools (used by the SWE-bench runner) |
+| `EMBER_VERBOSE` | unset; `1` makes `ember -p "/fix …"` log every tool call its branches make (`[fix:activity]` lines on stderr) |
 | `EMBER_MOUSE` | `on`; `off` keeps your terminal's normal text selection (no wheel scrolling) |
 | `EMBER_COLORS` | auto; `256` or `truecolor` to override color detection |
 | `EMBER_THEME` | `kawaii` (pastel, sparkles, kaomoji); `classic` for the original orange look. `/theme` switches and remembers it in `~/.config/ember/theme` |

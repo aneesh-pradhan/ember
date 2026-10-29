@@ -69,8 +69,15 @@ fn print_fix_event(ev: crate::fix::FixEvent) {
             eprintln!("[fix:result] {winner}: {title}");
             println!("{diff}");
         }
+        // Every tool call the branches make; too noisy by default, but what you need to debug a /fix run from logs.
+        FixEvent::Activity(a) if verbose() => eprintln!("[fix:activity] {a}"),
         FixEvent::Activity(_) => {}
     }
+}
+
+/// EMBER_VERBOSE=1 logs more of what print mode does.
+fn verbose() -> bool {
+    matches!(std::env::var("EMBER_VERBOSE").as_deref(), Ok("1" | "true" | "on"))
 }
 
 #[tokio::main]
@@ -112,6 +119,8 @@ async fn print_mode(config: Config, cwd: std::path::PathBuf, prompt: String, yes
     };
     let mut out = std::io::stdout();
     let (mut steps, mut tools, mut prompt_tokens, mut cached, mut completion) = (0, 0, 0, 0, 0);
+    // Whether part of a reply is on stdout, so a retry can mark it as discarded.
+    let mut partial = false;
     // Per model, for pricing runs that mix tiers (/fix uses Nano, Super and Ultra): calls, input, cached, output.
     let mut by_model: std::collections::BTreeMap<String, [u64; 4]> = Default::default();
     while let Some(event) = rx.recv().await {
@@ -119,8 +128,20 @@ async fn print_mode(config: Config, cwd: std::path::PathBuf, prompt: String, yes
             AgentEvent::Text(t) => {
                 print!("{t}");
                 out.flush()?;
+                partial = true;
             }
-            AgentEvent::Reply { content, .. } if !content.is_empty() => println!(),
+            AgentEvent::Reply { content, .. } => {
+                if !content.is_empty() {
+                    println!();
+                }
+                partial = false;
+            }
+            // The reply streams again from the start, so close off the broken one rather than run them together.
+            AgentEvent::Retrying(why) if partial => {
+                println!("\n[reply interrupted; retrying from the start]");
+                eprintln!("[retry] {why}");
+                partial = false;
+            }
             AgentEvent::Retrying(why) => eprintln!("[retry] {why}"),
             AgentEvent::ToolDone { summary, ok, .. } => {
                 tools += 1;
