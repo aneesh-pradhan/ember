@@ -90,12 +90,21 @@ def run_agent(rt: str, ember: Path, inst: dict, config: str, prompt: str, timeou
         # The prompt is passed as an argument ($1) so no shell quoting touches the issue text.
         script = "source /opt/miniconda3/bin/activate testbed && cd /testbed && exec ember --yes -p \"$1\""
         started, timed_out = time.time(), False
-        try:
-            proc = subprocess.run([rt, "exec", name, "bash", "-c", script, "ember-task", prompt],
-                                  capture_output=True, **TEXT, timeout=timeout)
-            stdout, stderr = proc.stdout, proc.stderr
-        except subprocess.TimeoutExpired as e:
-            stdout, stderr, timed_out = _text(e.stdout), _text(e.stderr), True
+        proc = subprocess.Popen([rt, "exec", name, "bash", "-c", script, "ember-task", prompt],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, **TEXT)
+        # The deadline is wall-clock time, so time spent asleep counts: subprocess's own timeout runs on a
+        # monotonic clock that stops during suspend. Killing the container is what reliably ends the exec session.
+        while True:
+            try:
+                stdout, stderr = proc.communicate(timeout=10)
+                break
+            except subprocess.TimeoutExpired:
+                if time.time() - started > timeout:
+                    timed_out = True
+                    subprocess.run([rt, "kill", name], capture_output=True)
+                    proc.kill()
+                    stdout, stderr = proc.communicate()
+                    break
         seconds = time.time() - started
         (logs / f"{inst['instance_id']}.{config}.log").write_text(f"{stderr}\n--- stdout ---\n{stdout}")
         if not timed_out and "[usage]" not in stderr:
@@ -145,10 +154,6 @@ def run_one(rt: str, ember: Path, inst: dict, config: str, prompt: str, timeout:
     except Exception as e:  # keep going; the row records what broke
         row["error"] = f"{type(e).__name__}: {e}"[:300]
     return row
-
-
-def _text(b) -> str:
-    return b.decode("utf-8", errors="replace") if isinstance(b, bytes) else (b or "")
 
 
 def main() -> None:
