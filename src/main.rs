@@ -108,6 +108,8 @@ async fn print_mode(config: Config, cwd: std::path::PathBuf, prompt: String, yes
     };
     let mut out = std::io::stdout();
     let (mut steps, mut tools, mut prompt_tokens, mut cached, mut completion) = (0, 0, 0, 0, 0);
+    // Per model, for pricing runs that mix tiers (/fix uses Nano, Super and Ultra): calls, input, cached, output.
+    let mut by_model: std::collections::BTreeMap<String, [u64; 4]> = Default::default();
     while let Some(event) = rx.recv().await {
         match event {
             AgentEvent::Text(t) => {
@@ -119,7 +121,12 @@ async fn print_mode(config: Config, cwd: std::path::PathBuf, prompt: String, yes
                 tools += 1;
                 eprintln!("[{}] {summary}", if ok { "ok" } else { "failed" })
             }
-            AgentEvent::Usage { prompt, completion: c, cached: k, .. } => {
+            AgentEvent::Usage { model, prompt, completion: c, cached: k } => {
+                let m = by_model.entry(model).or_default();
+                m[0] += 1;
+                m[1] += prompt;
+                m[2] += k;
+                m[3] += c;
                 steps += 1;
                 prompt_tokens += prompt;
                 completion += c;
@@ -142,5 +149,8 @@ async fn print_mode(config: Config, cwd: std::path::PathBuf, prompt: String, yes
     turn.await??;
     let pct = (cached * 100).checked_div(prompt_tokens).unwrap_or(0);
     eprintln!("[usage] {steps} model calls, {tools} tool calls, {prompt_tokens} input tokens ({pct}% cached), {completion} output tokens");
+    for (model, [calls, input, cached, output]) in by_model {
+        eprintln!("[usage:model] {model}: {calls} calls, {input} input, {cached} cached, {output} output");
+    }
     Ok(())
 }
