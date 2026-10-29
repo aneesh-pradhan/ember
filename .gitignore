@@ -24,3 +24,6 @@ __pycache__/
 *.swp
 *~
 .DS_Store
+
+# SWE-bench run logs, patches and grader output (summaries go in bench/results/)
+/bench/swebench/runs/

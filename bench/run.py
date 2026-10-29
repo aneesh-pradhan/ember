@@ -53,6 +53,16 @@ CONFIGS = {
 USAGE_RE = re.compile(r"\[usage\] (\d+) model calls, (\d+) tool calls, (\d+) input tokens \((\d+)% cached\), (\d+) output tokens")
 
 
+def usage_and_cost(stderr: str, model: str) -> dict:
+    """Parse ember's `[usage]` line from print mode and price it with Token Factory rates."""
+    m = USAGE_RE.search(stderr)
+    calls, tools, inp, pct, out = (int(x) for x in m.groups()) if m else (0, 0, 0, 0, 0)
+    cached = inp * pct // 100
+    price_in, price_cached, price_out = PRICES.get(model, PRICES[SUPER])
+    cost = ((inp - cached) * price_in + cached * price_cached + out * price_out) / 1e6
+    return {"model_calls": calls, "tool_calls": tools, "input": inp, "cached": cached, "output": out, "cost": round(cost, 5)}
+
+
 def run_one(ember: str, config: str, task: Path, timeout: int) -> dict:
     work = Path(tempfile.mkdtemp(prefix=f"ember-bench-{config}-{task.name}-"))
     try:
@@ -70,15 +80,10 @@ def run_one(ember: str, config: str, task: Path, timeout: int) -> dict:
         seconds = time.time() - started
         shutil.copy(task / "hidden_test.py", repo / "tests" / "test_hidden.py")
         tests = subprocess.run(f"{TEST_CMD} tests", shell=True, cwd=repo, capture_output=True, text=True, timeout=300)
-        m = USAGE_RE.search(stderr)
-        calls, tools, inp, pct, out = (int(x) for x in m.groups()) if m else (0, 0, 0, 0, 0)
-        cached = inp * pct // 100
-        price_in, price_cached, price_out = PRICES.get(CONFIGS[config]["EMBER_MODEL_CODER"], PRICES[SUPER])
-        cost = ((inp - cached) * price_in + cached * price_cached + out * price_out) / 1e6
         return {
             "config": config, "task": task.name, "passed": tests.returncode == 0 and not timed_out,
-            "seconds": round(seconds, 1), "model_calls": calls, "tool_calls": tools,
-            "input": inp, "cached": cached, "output": out, "cost": round(cost, 5), "timed_out": timed_out,
+            "seconds": round(seconds, 1), **usage_and_cost(stderr, CONFIGS[config]["EMBER_MODEL_CODER"]),
+            "timed_out": timed_out,
         }
     finally:
         shutil.rmtree(work, ignore_errors=True)

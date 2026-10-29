@@ -12,9 +12,14 @@ fn tavily_key() -> Option<String> {
     std::env::var("TAVILY_API_KEY").ok().filter(|k| !k.trim().is_empty())
 }
 
-/// web_search needs a Tavily key; web_fetch always works.
+/// EMBER_NO_WEB=1 removes both web tools, e.g. for benchmarks where the upstream fix is online.
+pub fn enabled() -> bool {
+    !matches!(std::env::var("EMBER_NO_WEB").as_deref(), Ok("1" | "true" | "on"))
+}
+
+/// web_search needs a Tavily key; web_fetch works whenever web tools are enabled.
 pub fn search_available() -> bool {
-    tavily_key().is_some()
+    enabled() && tavily_key().is_some()
 }
 
 fn client() -> reqwest::Client {

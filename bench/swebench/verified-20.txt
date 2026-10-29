@@ -1,0 +1,21 @@
+# 20 SWE-bench Verified instances: random.Random(0).sample() over the 497 instances not rated ">4 hours".
+astropy__astropy-8707                    # 15 min - 1 hour
+django__django-13821                     # <15 min fix
+django__django-14434                     # 15 min - 1 hour
+django__django-15268                     # 1-4 hours
+django__django-15561                     # 15 min - 1 hour
+django__django-15851                     # <15 min fix
+django__django-16082                     # 15 min - 1 hour
+django__django-16899                     # <15 min fix
+django__django-17029                     # <15 min fix
+matplotlib__matplotlib-22865             # 15 min - 1 hour
+pydata__xarray-2905                      # 15 min - 1 hour
+sphinx-doc__sphinx-7440                  # <15 min fix
+sphinx-doc__sphinx-8459                  # <15 min fix
+sympy__sympy-12096                       # <15 min fix
+sympy__sympy-13551                       # 15 min - 1 hour
+sympy__sympy-16886                       # <15 min fix
+sympy__sympy-17139                       # <15 min fix
+sympy__sympy-19954                       # <15 min fix
+sympy__sympy-24539                       # <15 min fix
+sympy__sympy-24562                       # <15 min fix

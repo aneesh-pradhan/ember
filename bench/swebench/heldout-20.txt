@@ -1,0 +1,22 @@
+# Held-out set: random.Random(1).sample() of 20 Verified instances not rated ">4 hours" and not in verified-20.txt.
+# Use it only to confirm a change chosen on verified-20.txt, never to choose one.
+astropy__astropy-14598                   # 15 min - 1 hour
+django__django-11133                     # <15 min fix
+django__django-11451                     # <15 min fix
+django__django-11815                     # 15 min - 1 hour
+django__django-12039                     # 15 min - 1 hour
+django__django-13344                     # 1-4 hours
+django__django-13820                     # 15 min - 1 hour
+django__django-15569                     # <15 min fix
+django__django-16642                     # <15 min fix
+django__django-17087                     # <15 min fix
+matplotlib__matplotlib-20859             # <15 min fix
+matplotlib__matplotlib-23299             # 15 min - 1 hour
+pydata__xarray-3677                      # 15 min - 1 hour
+pytest-dev__pytest-7521                  # <15 min fix
+sphinx-doc__sphinx-8475                  # <15 min fix
+sphinx-doc__sphinx-8551                  # 15 min - 1 hour
+sphinx-doc__sphinx-9461                  # 1-4 hours
+sympy__sympy-11618                       # 15 min - 1 hour
+sympy__sympy-15809                       # <15 min fix
+sympy__sympy-20801                       # 15 min - 1 hour
