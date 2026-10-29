@@ -169,6 +169,7 @@ automatically, so you can pick them up later.
 | `/plan`, `/auto` | Toggle plan mode / auto-accept |
 | `/model [nano\|super\|ultra\|id]` | Show or switch the model; `/models` lists those on your key |
 | `/think [on\|low\|off]` | Set how much Nemotron reasons before acting |
+| `/theme [kawaii\|classic]` | Switch the look: pastel kawaii with sparkles and a moody mascot (default), or the original classic orange |
 | `/resume [n]` | List saved conversations in this directory, or continue one |
 | `/compact` | Summarize the conversation so far to free up context |
 | `/mcp` | Show connected MCP servers and their tools |
