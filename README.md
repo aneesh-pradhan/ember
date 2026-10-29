@@ -174,6 +174,7 @@ automatically, so you can pick them up later.
 | `/compact` | Summarize the conversation so far to free up context |
 | `/mcp` | Show connected MCP servers and their tools |
 | `/diff`, `/todos`, `/usage` | Uncommitted changes; task list; token usage per model, including prompt-cache hits |
+| `/permissions` | What runs without asking. `/permissions save` keeps this session's "always" approvals for the project (stored in `~/.config/ember/permissions.json`, never in the repo); `/permissions forget` clears them |
 | `/clear`, `/quit` | New conversation; exit (or Ctrl+C twice) |
 
 ember reads project instructions from `AGENTS.md` or `EMBER.md` in the working directory.

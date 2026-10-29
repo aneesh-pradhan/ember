@@ -200,6 +200,40 @@ async fn retries_dropped_connections_broken_streams_and_server_errors() {
     assert_eq!(model.requests().len(), 1, "a 400 was retried");
 }
 
+fn approvals(events: &[AgentEvent]) -> Vec<String> {
+    events.iter().filter_map(|e| match e {
+        AgentEvent::Notice(n) => n.strip_prefix("approval: ").map(String::from),
+        _ => None,
+    }).collect()
+}
+
+/// "Always" lasts for the session; `/permissions save` keeps it for the project in the user's config, so a new
+/// session runs the same command prefix without asking (and still asks for others), until `forget`.
+#[tokio::test]
+async fn saved_permissions_carry_over_to_new_sessions() {
+    let dir = project(&[]);
+    let file = dir.join("config/permissions.json");
+    let bash = |cmd: &str| Reply::Tools(vec![call("bash", json!({"command": cmd}))]);
+    let model = MockModel::start(vec![
+        bash("ls -a"), Reply::Text("listed"),
+        bash("ls -l"), bash("pwd -L"), Reply::Text("done"),
+        bash("ls -l"), Reply::Text("asked"),
+    ])
+    .await;
+
+    let mut first = agent(&model, &dir, Mode::Ask).with_permissions_file(file.clone());
+    assert_eq!(approvals(&turn(&mut first, "list", Decision::Always).await), ["Run `ls -a`"]);
+    first.save_permissions(true).unwrap();
+    assert!(std::fs::read_to_string(&file).unwrap().contains("\"ls\""));
+
+    let mut second = agent(&model, &dir, Mode::Ask).with_permissions_file(file.clone());
+    assert_eq!(approvals(&turn(&mut second, "list again", Decision::Yes).await), ["Run `pwd -L`"], "ls was saved");
+
+    second.save_permissions(false).unwrap();
+    let mut third = agent(&model, &dir, Mode::Ask).with_permissions_file(file);
+    assert_eq!(approvals(&turn(&mut third, "once more", Decision::Yes).await), ["Run `ls -l`"], "forgotten");
+}
+
 /// New files are listed by absolute path at the end of the turn; edits to existing files aren't.
 #[tokio::test]
 async fn names_new_files_by_full_path() {
