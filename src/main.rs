@@ -10,6 +10,7 @@ mod markdown;
 mod mcp;
 #[cfg(test)]
 mod mock;
+mod repomap;
 mod session;
 mod theme;
 mod tools;

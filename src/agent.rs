@@ -779,6 +779,9 @@ pub fn system_prompt(root: &Path) -> String {
         }
         None => "Not a git repository.".into(),
     };
+    let map = crate::repomap::build(root)
+        .map(|m| format!("\n\n# Project map (files and top-level definitions; read files for details)\n{m}"))
+        .unwrap_or_default();
     let instructions = ["AGENTS.md", "EMBER.md"]
         .iter()
         .find_map(|name| std::fs::read_to_string(root.join(name)).ok().map(|t| (name, t)))
@@ -811,7 +814,7 @@ pub fn system_prompt(root: &Path) -> String {
          - When you finish a task, briefly say what you changed and how you verified it, including anything \
            that failed or that you could not check.\n\n\
          # Environment\n\
-         Working directory: {}\nOS: {}\nDate: {date}\n{git}{instructions}",
+         Working directory: {}\nOS: {}\nDate: {date}\n{git}{map}{instructions}",
         root.display(),
         std::env::consts::OS,
     )
