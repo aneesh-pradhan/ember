@@ -12,7 +12,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::config::{context_window, vision_model};
 use crate::fix::FixEvent;
-use crate::llm::{Client, Delta, Message, Request, Think, ToolCall, ToolSpec};
+use crate::llm::{Client, Delta, FunctionCall, Message, Request, Think, ToolCall, ToolSpec};
 use crate::mcp::Mcp;
 use crate::session::{self, Session};
 use crate::tools::{self, Workspace};
@@ -133,6 +133,21 @@ pub fn command_prefix(command: &str) -> Option<String> {
     }
 }
 
+/// The tool a reply hands the turn back with. Follow-up messages are sent as its result instead of as a new user
+/// message: on Token Factory a new user message misses the prompt cache for the whole conversation (and Nemotron's
+/// chat template re-renders earlier replies once a newer user message exists), while a tool result only extends
+/// the prompt, so the history stays cached.
+const ASK_USER: &str = "ask_user";
+
+fn ask_user_spec() -> ToolSpec {
+    ToolSpec::new(
+        ASK_USER,
+        "Ask the user a question and wait for their answer, when you can't continue without their input. Their next \
+         message comes back as this tool's result.",
+        json!({"type": "object", "properties": {"question": {"type": "string"}}}),
+    )
+}
+
 fn view_image_spec() -> ToolSpec {
     ToolSpec::new(
         "view_image",
@@ -182,6 +197,8 @@ pub struct Agent {
     checkpoints: Vec<Checkpoint>,
     /// Send each step's reasoning back to the model within the task (EMBER_KEEP_REASONING=0 turns it off).
     keep_reasoning: bool,
+    /// Offer `ask_user` and send follow-ups as its result (the full-screen UI; print mode has a single turn).
+    interactive: bool,
 }
 
 impl Agent {
@@ -201,6 +218,7 @@ impl Agent {
             last_prompt_tokens: 0,
             checkpoints: vec![],
             keep_reasoning: !matches!(std::env::var("EMBER_KEEP_REASONING").as_deref(), Ok("0" | "false" | "off")),
+            interactive: false,
         };
         agent.reset();
         agent
@@ -222,6 +240,12 @@ impl Agent {
         self.title = saved.title;
         self.messages.extend(saved.messages.into_iter().filter(|m| m.role != "system"));
         self.messages.len() - 1
+    }
+
+    /// For the full-screen UI: offer `ask_user` and send follow-up messages as its result.
+    pub fn interactive(mut self) -> Self {
+        self.interactive = true;
+        self
     }
 
     pub fn session_id(&self) -> &str {
@@ -252,20 +276,62 @@ impl Agent {
 
     /// After a cancelled turn, answer any tool calls left without results so the history stays valid.
     fn repair(&mut self) {
+        self.answer_missing(true);
+    }
+
+    /// Like `repair`, but leaves an open `ask_user` call for `push_input` to answer when `include_ask` is false.
+    fn answer_missing(&mut self, include_ask: bool) {
         let Some(pos) = self.messages.iter().rposition(|m| m.role == "assistant" && !m.tool_calls.is_empty()) else {
             return;
         };
         let answered: HashSet<String> =
             self.messages[pos + 1..].iter().filter_map(|m| m.tool_call_id.clone()).collect();
-        let missing: Vec<String> = self.messages[pos]
+        let missing: Vec<(String, bool)> = self.messages[pos]
             .tool_calls
             .iter()
-            .filter(|c| !answered.contains(&c.id))
-            .map(|c| c.id.clone())
+            .filter(|c| !answered.contains(&c.id) && (include_ask || c.function.name != ASK_USER))
+            .map(|c| (c.id.clone(), c.function.name == ASK_USER))
             .collect();
-        for id in missing {
-            self.messages.push(Message::tool(id, "Cancelled: the user interrupted before this ran."));
+        for (id, ask) in missing {
+            let text = if ask { "(The user moved on without answering.)" } else { "Cancelled: the user interrupted before this ran." };
+            self.messages.push(Message::tool(id, text));
         }
+    }
+
+    /// Add the user's message. In the UI, after the first turn it answers the last reply's `ask_user` call
+    /// (adding one to a plain text reply, which no request has included yet), so the prompt only grows.
+    fn push_input(&mut self, content: String) {
+        if self.interactive {
+            if let Some(id) = self.open_ask_user() {
+                self.messages.push(Message::tool(id, content));
+                return;
+            }
+        }
+        self.messages.push(Message::user(content));
+    }
+
+    /// The id of an unanswered `ask_user` call on the last reply, adding one if the turn ended with plain text.
+    fn open_ask_user(&mut self) -> Option<String> {
+        let pos = self.messages.iter().rposition(|m| m.role == "assistant")?;
+        if self.messages[pos + 1..].iter().any(|m| m.role != "tool") {
+            return None;
+        }
+        let answered: HashSet<String> =
+            self.messages[pos + 1..].iter().filter_map(|m| m.tool_call_id.clone()).collect();
+        let reply = &mut self.messages[pos];
+        if let Some(call) = reply.tool_calls.iter().find(|c| c.function.name == ASK_USER && !answered.contains(&c.id)) {
+            return Some(call.id.clone());
+        }
+        if !reply.tool_calls.is_empty() {
+            return None;
+        }
+        let id = format!("ask_user_{pos}");
+        reply.tool_calls.push(ToolCall {
+            id: id.clone(),
+            kind: "function".into(),
+            function: FunctionCall { name: ASK_USER.into(), arguments: "{}".into() },
+        });
+        Some(id)
     }
 
     /// Record a command the user ran themselves with `!`, so the model can see it.
@@ -279,7 +345,7 @@ impl Agent {
     }
 
     pub async fn turn(&mut self, input: String, tx: &Events) -> Result<()> {
-        self.repair();
+        self.answer_missing(!self.interactive);
         let model = self.model.lock().unwrap().clone();
         if self.last_prompt_tokens as f64 > AUTO_COMPACT_AT * context_window(&model) as f64 {
             let _ = tx.send(AgentEvent::Notice("Context is nearly full; compacting the conversation first…".into()));
@@ -299,7 +365,7 @@ impl Agent {
             input
         };
         self.checkpoints.push(Checkpoint { label: self.title_for(&content), files: vec![] });
-        self.messages.push(Message::user(content));
+        self.push_input(content);
         let result = self.run_steps(tx, plan).await;
         if self.checkpoints.last().is_some_and(|c| c.files.is_empty()) {
             self.checkpoints.pop();
@@ -317,6 +383,9 @@ impl Agent {
         let mut specs = tools::specs(plan);
         specs.push(todo_spec());
         specs.push(view_image_spec());
+        if self.interactive {
+            specs.push(ask_user_spec());
+        }
         if !plan {
             specs.extend(self.mcp.specs());
         }
@@ -360,9 +429,22 @@ impl Agent {
             if resp.tool_calls.is_empty() {
                 return Ok(());
             }
+            let mut asked = false;
             for call in &resp.tool_calls {
+                if call.function.name == ASK_USER {
+                    // Answered by the user's next message (see push_input).
+                    let question = call.args()["question"].as_str().unwrap_or("").trim().to_string();
+                    if !question.is_empty() {
+                        let _ = tx.send(AgentEvent::Reply { content: question, thought_secs: None });
+                    }
+                    asked = true;
+                    continue;
+                }
                 let result = self.execute(call, tx, plan).await;
                 self.messages.push(Message::tool(call.id.clone(), result));
+            }
+            if asked {
+                return Ok(());
             }
         }
         let _ = tx.send(AgentEvent::Notice(format!("Stopped after {MAX_STEPS} steps; say \"continue\" to keep going.")));
@@ -694,6 +776,52 @@ fn debug_log(name: &str, args: &serde_json::Value, output: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn agent(interactive: bool) -> Agent {
+        let model = Arc::new(Mutex::new("nvidia/nemotron-3-super-120b-a12b".to_string()));
+        let agent = Agent::new(Client::new("http://localhost", None), model, SharedMode::new(Mode::Ask), Workspace::new(std::env::temp_dir()));
+        if interactive { agent.interactive() } else { agent }
+    }
+
+    #[test]
+    fn follow_ups_answer_ask_user_instead_of_adding_user_messages() {
+        let mut a = agent(true);
+        a.push_input("first".into());
+        assert_eq!(a.messages.last().unwrap().role, "user");
+
+        // A plain reply gets an ask_user call, and the follow-up becomes its result.
+        a.messages.push(Message::assistant("done", vec![]));
+        a.push_input("second".into());
+        let [.., reply, answer] = &a.messages[..] else { panic!() };
+        assert_eq!(reply.tool_calls[0].function.name, ASK_USER);
+        assert_eq!((answer.role.as_str(), answer.content.as_str()), ("tool", "second"));
+        assert_eq!(answer.tool_call_id.as_ref(), Some(&reply.tool_calls[0].id));
+        assert_eq!(a.messages.iter().filter(|m| m.role == "user").count(), 1);
+
+        // A model-made ask_user call alongside other tools is answered after their results.
+        let call = |id: &str, name: &str| ToolCall { id: id.into(), kind: "function".into(), function: FunctionCall { name: name.into(), arguments: "{}".into() } };
+        a.messages.push(Message::assistant("", vec![call("c1", "read_file"), call("c2", ASK_USER)]));
+        a.messages.push(Message::tool("c1", "file text"));
+        a.answer_missing(false);
+        a.push_input("third".into());
+        assert_eq!(a.messages.last().unwrap().tool_call_id.as_deref(), Some("c2"));
+    }
+
+    #[test]
+    fn print_mode_keeps_user_messages_and_repair_closes_ask_user() {
+        let mut a = agent(false);
+        a.push_input("first".into());
+        a.messages.push(Message::assistant("done", vec![]));
+        a.push_input("second".into());
+        assert_eq!(a.messages.last().unwrap().role, "user");
+
+        let mut b = agent(true);
+        b.push_input("first".into());
+        let ask = ToolCall { id: "q".into(), kind: "function".into(), function: FunctionCall { name: ASK_USER.into(), arguments: "{}".into() } };
+        b.messages.push(Message::assistant("", vec![ask]));
+        b.repair();
+        assert_eq!(b.messages.last().unwrap().tool_call_id.as_deref(), Some("q"));
+    }
 
     #[test]
     fn command_prefixes() {
