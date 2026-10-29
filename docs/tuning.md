@@ -56,3 +56,19 @@ What it changed:
   description doesn't mention. Only `Decimal(str(x))` passes it; `Decimal(x).quantize(...)` still rounds down.
 
 The sample is small (3 runs per task), so differences of one pass are noise.
+
+## SWE-bench Verified and the tuning loop
+
+The main number is **cost per resolved task** on SWE-bench Verified. `bench/swebench.py` runs ember in print mode
+inside each instance's official image, with its web tools off, and grades the diff with the official `swebench`
+harness. `bench/swebench/verified-20.txt` is the working set; `bench/swebench/heldout-20.txt` is a disjoint
+held-out set. Harness changes follow the loop NVIDIA and LangChain used to tune Deep Agents for Nemotron:
+
+1. **Find failures in traces, not guesses.** `bench/swebench_compare.py <run ids>` lines runs up per instance and
+   lists the agent log behind every flip. Read the log and name the mechanical cause: a wasted round trip, a
+   misread tool result, a cut-off reply.
+2. **Prefer general, mechanical fixes** (tool output, tool descriptions, error messages, prompt wording) over
+   instructions aimed at one instance's domain, which overfit.
+3. **Verify before believing.** Rerun the working set under new run ids (the runner resumes per run id) and keep
+   a change only if it holds across repeats. At 20 instances, one flip is noise.
+4. **Confirm on the held-out set** once, after choosing a change on the working set.

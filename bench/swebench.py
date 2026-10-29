@@ -15,7 +15,8 @@ uses. Each finished instance is appended to the CSV, so a rerun skips instances 
       'rustup target add x86_64-unknown-linux-musl && apt-get update && apt-get install -y musl-tools &&
        CARGO_TARGET_DIR=/src/target/musl cargo build --release --locked --target x86_64-unknown-linux-musl'
 
-    uv run bench/swebench.py --instances bench/swebench/verified-20.txt --config super
+    uv run bench/swebench.py --instances bench/swebench/verified-20.txt --config super --run-id baseline
+    python3 bench/swebench_compare.py baseline other-run   # per-instance flips, cost per resolved task
 
 Needs podman or docker (for podman, `systemctl --user start podman.socket` so the grader can reach it) and
 NEBIUS_API_KEY in the environment or ~/.config/ember/env.
@@ -38,6 +39,8 @@ ROOT = Path(__file__).resolve().parent.parent
 HERE = ROOT / "bench" / "swebench"
 DATASET = "SWE-bench/SWE-bench_Verified"
 DEFAULT_EMBER = ROOT / "target" / "musl" / "x86_64-unknown-linux-musl" / "release" / "ember"
+# Repos ship files that aren't valid UTF-8, so decode command output leniently instead of crashing.
+TEXT = {"text": True, "encoding": "utf-8", "errors": "replace"}
 FIELDS = ["instance_id", "config", "resolved", "patch_lines", "seconds", "model_calls", "tool_calls",
           "input", "cached", "output", "cost", "timed_out", "error"]
 
@@ -75,18 +78,20 @@ def run_agent(rt: str, ember: Path, inst: dict, config: str, prompt: str, timeou
     env_args = [arg for k, v in env.items() for arg in ("-e", f"{k}={v}")]
     subprocess.run([rt, "rm", "-f", name], capture_output=True)
     # `-e NEBIUS_API_KEY` without a value copies it from our environment, so the key never appears in argv.
-    subprocess.run(
+    started = subprocess.run(
         [rt, "run", "-d", "--name", name, "-e", "NEBIUS_API_KEY", *env_args,
          "-v", f"{ember}:/usr/local/bin/ember:ro,z", f"docker.io/{inst['image']}", "sleep", "infinity"],
-        check=True, capture_output=True, text=True,
+        capture_output=True, **TEXT,
     )
+    if started.returncode != 0:
+        raise RuntimeError(f"couldn't start {inst['image']}: {started.stderr.strip()[-400:]}")
     try:
         # The prompt is passed as an argument ($1) so no shell quoting touches the issue text.
         script = "source /opt/miniconda3/bin/activate testbed && cd /testbed && exec ember --yes -p \"$1\""
         started, timed_out = time.time(), False
         try:
             proc = subprocess.run([rt, "exec", name, "bash", "-c", script, "ember-task", prompt],
-                                  capture_output=True, text=True, timeout=timeout)
+                                  capture_output=True, **TEXT, timeout=timeout)
             stdout, stderr = proc.stdout, proc.stderr
         except subprocess.TimeoutExpired as e:
             stdout, stderr, timed_out = _text(e.stdout), _text(e.stderr), True
@@ -96,7 +101,7 @@ def run_agent(rt: str, ember: Path, inst: dict, config: str, prompt: str, timeou
         diff = subprocess.run(
             [rt, "exec", "-w", "/testbed", name, "bash", "-c",
              "git add -A -- . ':(exclude).ember' && git diff --cached --text HEAD"],
-            capture_output=True, text=True,
+            capture_output=True, **TEXT,
         ).stdout
         return {"patch": diff, "seconds": round(seconds, 1), "timed_out": timed_out,
                 **usage_and_cost(stderr, CONFIGS[config]["EMBER_MODEL_CODER"])}
@@ -114,7 +119,7 @@ def grade(inst: dict, config: str, patch: str, run_id: str, out: Path) -> bool:
     subprocess.run(
         [sys.executable, "-m", "swebench.harness.run_evaluation", "-d", DATASET, "-i", inst["instance_id"],
          "-p", str(preds), "-id", run_id, "--max_workers", "1", "--report_dir", str(out / "reports")],
-        cwd=out, capture_output=True, text=True,
+        cwd=out, capture_output=True, **TEXT,
     )
     report = out / "logs" / "run_evaluation" / run_id / model / inst["instance_id"] / "report.json"
     if not report.exists():
@@ -136,7 +141,7 @@ def run_one(rt: str, ember: Path, inst: dict, config: str, prompt: str, timeout:
 
 
 def _text(b) -> str:
-    return b.decode(errors="replace") if isinstance(b, bytes) else (b or "")
+    return b.decode("utf-8", errors="replace") if isinstance(b, bytes) else (b or "")
 
 
 def main() -> None:
