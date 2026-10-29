@@ -135,6 +135,7 @@ pub async fn run(
     initial: Option<String>,
     resume_last: bool,
     think: crate::llm::Think,
+    max_steps: Option<usize>,
 ) -> Result<()> {
     let (tx, rx) = mpsc::unbounded_channel();
     let client = config.client();
@@ -142,7 +143,8 @@ pub async fn run(
     let mode = SharedMode::new(mode);
     let agent = Agent::new(client.clone(), model.clone(), mode.clone(), Workspace::new(cwd.clone()))
         .interactive()
-        .with_draft_model(config.draft.clone());
+        .with_draft_model(config.draft.clone())
+        .with_max_steps(max_steps);
     *agent.think.lock().unwrap() = think;
     let (mcp, mcp_cwd) = (agent.mcp.clone(), cwd.clone());
     tokio::spawn(async move { mcp.start(&mcp_cwd).await });
