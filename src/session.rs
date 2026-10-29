@@ -50,7 +50,7 @@ pub fn list(cwd: &str) -> Vec<Session> {
         .filter_map(|e| serde_json::from_slice::<Session>(&std::fs::read(e.path()).ok()?).ok())
         .filter(|s| s.cwd == cwd)
         .collect();
-    sessions.sort_by(|a, b| b.updated.cmp(&a.updated));
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.updated));
     sessions
 }
 

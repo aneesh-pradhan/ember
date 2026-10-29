@@ -44,10 +44,7 @@ async fn tavily(endpoint: &str, body: Value) -> Result<Value, String> {
 
 pub async fn search(args: &Value) -> Result<String, String> {
     let query = args["query"].as_str().filter(|q| !q.trim().is_empty()).ok_or("query is required")?;
-    let topic = match args["topic"].as_str() {
-        Some(t @ ("news" | "finance")) => t,
-        _ => "general",
-    };
+    let topic = args["topic"].as_str().filter(|t| matches!(*t, "news" | "finance")).unwrap_or("general");
     let max = args["max_results"].as_u64().unwrap_or(5).clamp(1, 10);
     let v = tavily("search", json!({
         "query": query, "topic": topic, "max_results": max,
