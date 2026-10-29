@@ -29,6 +29,11 @@ impl Workspace {
     }
 
     pub fn resolve(&self, path: &str) -> Result<PathBuf, String> {
+        // Nemotron sometimes sends two paths joined by a newline as one; writing that creates a directory whose
+        // name ends in a newline. Refuse rather than guess, so the model sends one path per call.
+        if path.chars().any(char::is_control) {
+            return Err(format!("{path:?} contains a newline or control character; send one plain path"));
+        }
         let path = if path.is_empty() { "." } else { path };
         let joined = if Path::new(path).is_absolute() { PathBuf::from(path) } else { self.root.join(path) };
         let mut clean = PathBuf::new();
@@ -663,6 +668,9 @@ mod tests {
         let ws = Workspace::new(PathBuf::from("/tmp/proj"));
         assert!(ws.resolve("../etc/passwd").is_err());
         assert_eq!(ws.resolve("src/../lib.rs").unwrap(), PathBuf::from("/tmp/proj/lib.rs"));
+        // Seen live: two paths joined by a newline, which created a directory named "c6.txt\n".
+        assert!(ws.resolve("data/c6.txt\n/data/c6.txt").unwrap_err().contains("newline"));
+        assert!(ws.resolve("a.txt\t").is_err());
     }
 
     #[test]
