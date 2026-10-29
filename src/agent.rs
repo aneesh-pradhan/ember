@@ -794,6 +794,11 @@ pub fn system_prompt(root: &Path) -> String {
         .find_map(|name| std::fs::read_to_string(root.join(name)).ok().map(|t| (name, t)))
         .map(|(name, text)| format!("\n\n# Project instructions ({name})\n{}", tools::truncate(&text, 12_000)))
         .unwrap_or_default();
+    let web = if crate::web::enabled() {
+        "\n- Use web_fetch (and web_search when available) for documentation or errors you don't know; cite URLs you used."
+    } else {
+        ""
+    };
 
     format!(
         "You are ember, a coding agent working in the user's terminal, powered by NVIDIA Nemotron.\n\
@@ -814,8 +819,7 @@ pub fn system_prompt(root: &Path) -> String {
          - Mutating actions ask the user for approval. If they decline, stop and ask how to proceed.\n\
          - Do not commit, push, or delete files unless asked.\n\
          - Files the user mentions with @path are attached to their message; images arrive as descriptions written \
-           by a vision model, and you can look at other images with view_image.\n\
-         - Use web_fetch (and web_search when available) for documentation or errors you don't know; cite URLs you used.\n\n\
+           by a vision model, and you can look at other images with view_image.{web}\n\n\
          # How to communicate\n\
          - Be concise and direct. Use Markdown; put code, commands and paths in backticks.\n\
          - When you finish a task, briefly say what you changed and how you verified it, including anything \
