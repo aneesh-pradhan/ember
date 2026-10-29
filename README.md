@@ -64,8 +64,9 @@ reasoning with `/think on|low|off` (or `--think`). Nemotron's reasoning is strea
 the transcript.
 
 ember is tuned for these models on Token Factory: it turns reasoning off for mechanical drafting, batches file
-reads into single tool calls, and keeps the prompt prefix stable so repeat requests hit the cache. The measurements
-and reasoning are in [docs/tuning.md](docs/tuning.md).
+reads into single tool calls, keeps the prompt prefix stable so repeat requests hit the cache, and sends Super's
+reasoning back between steps of a task. On ember's coding benchmark, Super with kept reasoning passed 14 of 15
+runs at 8.7 s and $0.0034 per task. The measurements and benchmark are in [docs/tuning.md](docs/tuning.md).
 
 ## Install
 
