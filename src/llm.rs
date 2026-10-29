@@ -255,16 +255,18 @@ impl Client {
         }
         let message = &value["choices"][0]["message"];
         let mut splitter = ThinkSplitter::default();
+        let mut cites = CitationStripper::default();
         let mut text: String = splitter
             .feed(message["content"].as_str().unwrap_or(""))
             .into_iter()
             .filter(|(visible, _)| *visible)
-            .map(|(_, t)| t)
+            .map(|(_, t)| cites.feed(&t))
             .collect();
         let (visible, rest) = splitter.flush();
         if visible {
-            text.push_str(&rest);
+            text.push_str(&cites.feed(&rest));
         }
+        text.push_str(&cites.flush());
         let usage = Usage::from_json(&value["usage"]);
         Ok((text.trim().to_string(), usage))
     }
@@ -311,6 +313,7 @@ impl Client {
         let mut out = Response::default();
         let mut calls: BTreeMap<u64, ToolCall> = BTreeMap::new();
         let mut splitter = ThinkSplitter::default();
+        let mut cites = CitationStripper::default();
         let mut pending = Vec::<u8>::new();
         let mut stream = resp.bytes_stream();
 
@@ -349,6 +352,7 @@ impl Client {
                     }
                     if let Some(c) = delta["content"].as_str() {
                         for (is_text, piece) in splitter.feed(c) {
+                            let piece = if is_text { cites.feed(&piece) } else { piece };
                             handle(is_text, &piece, &mut out);
                         }
                     }
@@ -378,7 +382,9 @@ impl Client {
             }
         }
         let (is_text, rest) = splitter.flush();
+        let rest = if is_text { cites.feed(&rest) } else { rest };
         handle(is_text, &rest, &mut out);
+        handle(true, &cites.flush(), &mut out);
 
         for (i, (_, mut call)) in calls.into_iter().enumerate() {
             if call.id.is_empty() {
@@ -432,6 +438,44 @@ impl ThinkSplitter {
     }
 }
 
+/// Drops the `【{"cursor": 0, "loc": 0}】` citation markers Nemotron sometimes emits, even across chunks.
+/// Other `【…】` text is kept.
+#[derive(Default)]
+struct CitationStripper {
+    buf: String,
+}
+
+impl CitationStripper {
+    /// Longest marker held back while waiting for its closing bracket.
+    const MAX_MARKER: usize = 200;
+
+    fn feed(&mut self, text: &str) -> String {
+        self.buf.push_str(text);
+        let mut out = String::new();
+        while let Some(open) = self.buf.find('【') {
+            out.push_str(&self.buf[..open]);
+            self.buf.drain(..open);
+            let Some(close) = self.buf.find('】') else {
+                if self.buf.len() > Self::MAX_MARKER {
+                    out.push_str(&std::mem::take(&mut self.buf));
+                }
+                return out;
+            };
+            let end = close + '】'.len_utf8();
+            if !self.buf['【'.len_utf8()..close].trim_start().starts_with('{') {
+                out.push_str(&self.buf[..end]);
+            }
+            self.buf.drain(..end);
+        }
+        out.push_str(&std::mem::take(&mut self.buf));
+        out
+    }
+
+    fn flush(&mut self) -> String {
+        std::mem::take(&mut self.buf)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -463,6 +507,19 @@ mod tests {
         }
         push(vec![s.flush()]);
         (text, think)
+    }
+
+    #[test]
+    fn strips_citation_markers_across_chunks() {
+        let strip = |chunks: &[&str]| {
+            let mut s = CitationStripper::default();
+            let mut out: String = chunks.iter().map(|c| s.feed(c)).collect();
+            out.push_str(&s.flush());
+            out
+        };
+        assert_eq!(strip(&[r#"Rust 1.99.1【{"cursor": 0, "loc": 0}】."#]), "Rust 1.99.1.");
+        assert_eq!(strip(&["a【{\"cur", "sor\": 2}", "】b"]), "ab");
+        assert_eq!(strip(&["keep 【note】 and 【"]), "keep 【note】 and 【");
     }
 
     #[test]
