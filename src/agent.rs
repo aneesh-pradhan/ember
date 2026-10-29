@@ -809,6 +809,9 @@ fn debug_log(name: &str, args: &serde_json::Value, output: &str) {
 }
 
 #[cfg(test)]
+mod e2e;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
