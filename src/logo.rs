@@ -38,9 +38,9 @@ const SPRITE: [&str; 20] = [
 
 fn pixel(c: char) -> Option<Color> {
     Some(match c {
-        'D' => Color::Rgb(28, 30, 36),     // outline
-        'K' => Color::Rgb(54, 58, 66),     // body
-        'k' => Color::Rgb(84, 90, 102),    // body highlight
+        'D' => Color::Rgb(84, 46, 130),    // outline
+        'K' => Color::Rgb(140, 90, 206),   // body
+        'k' => Color::Rgb(176, 128, 232),  // body highlight
         'F' => Color::Rgb(36, 38, 44),     // heatsink fin
         'f' => Color::Rgb(118, 124, 136),  // fin edge
         'E' => Color::Rgb(16, 16, 20),     // eye
