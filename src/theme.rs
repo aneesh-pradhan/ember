@@ -246,7 +246,9 @@ pub enum Mood {
     Sad,
 }
 
-/// The mascot's face for a mood, or None in themes without kaomoji.
+/// The mascot's face for a mood, or None in themes without kaomoji. Faces use only single-width characters:
+/// the working indicator redraws ten times a second, and double-width characters (and halfwidth katakana marks
+/// like ･ﾟ) left stray, shifted cells behind in tmux when the face changed.
 pub fn face(mood: Mood) -> Option<&'static str> {
     if current() != Theme::Kawaii {
         return None;
@@ -255,9 +257,9 @@ pub fn face(mood: Mood) -> Option<&'static str> {
         Mood::Working => "(｡•ᴗ•｡)",
         Mood::Thinking => "(˘ω˘)",
         Mood::Busy => "ᕦ(•ᴗ•)ᕤ",
-        Mood::Sweaty => "(；・∀・)",
-        Mood::Happy => "(ﾉ◕ヮ◕)ﾉ*:･ﾟ✧",
-        Mood::Sad => "(╥﹏╥)",
+        Mood::Sweaty => "(•_•;)",
+        Mood::Happy => "\\(^ᴗ^)/",
+        Mood::Sad => "(╥_╥)",
     })
 }
 
@@ -324,7 +326,18 @@ mod tests {
         assert_eq!(face(Mood::Happy), None);
         assert_eq!(spinner(0), "⠋");
         set(Theme::Kawaii);
-        assert_eq!(face(Mood::Sad), Some("(╥﹏╥)"));
+        assert_eq!(face(Mood::Sad), Some("(╥_╥)"));
         assert_eq!(glyphs().todo_done, "♥");
+    }
+
+    #[test]
+    fn faces_and_spinner_are_single_width() {
+        use unicode_width::UnicodeWidthChar;
+        set(Theme::Kawaii);
+        let moods = [Mood::Working, Mood::Thinking, Mood::Busy, Mood::Sweaty, Mood::Happy, Mood::Sad];
+        let text: String = moods.iter().filter_map(|m| face(*m)).chain(KAWAII_GLYPHS.spinner.iter().copied()).collect();
+        for c in text.chars() {
+            assert!(c.width().unwrap_or(0) <= 1, "{c:?} is double-width");
+        }
     }
 }

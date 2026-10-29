@@ -319,12 +319,14 @@ impl App {
             AgentEvent::ToolStart { summary } => self.live_tool = Some(summary),
             AgentEvent::ToolDone { name, summary, output, ok } => {
                 self.live_tool = None;
-                if !ok {
+                // Commands report their exit status on the last line, "[exit code N]" or "[timed out]".
+                let failed = !ok || (name == "bash" && output.trim_end().lines().last() != Some("[exit code 0]"));
+                if failed {
                     self.reaction = Some((theme::Mood::Sad, Instant::now()));
                 } else if name == "bash" && theme::is_test_run(&summary) {
                     self.reaction = Some((theme::Mood::Happy, Instant::now()));
                 }
-                let (mark, dot) = if ok { (theme::glyphs().tool_ok, theme::ok()) } else { (theme::glyphs().tool_err, theme::err()) };
+                let (mark, dot) = if failed { (theme::glyphs().tool_err, theme::err()) } else { (theme::glyphs().tool_ok, theme::ok()) };
                 self.print_line(Line::from(vec![Span::styled(format!("  {mark} "), dot), Span::styled(summary, theme::bold())]));
                 if name == "bash" {
                     let lines: Vec<&str> = output.lines().collect();
@@ -332,7 +334,7 @@ impl App {
                     if start > 0 {
                         self.print_notice(format!("  … {start} earlier lines"));
                     }
-                    let style = if ok { theme::dim() } else { theme::err() };
+                    let style = if failed { theme::err() } else { theme::dim() };
                     for line in &lines[start..] {
                         self.print_line(Line::styled(format!("    │ {line}"), style));
                     }
