@@ -42,6 +42,8 @@ pub struct Config {
     pub fast: String,
     pub coder: String,
     pub reasoner: String,
+    /// Mechanical writing: commit messages, branch names, PR text and /compact summaries.
+    pub draft: String,
     pub fix_branches: usize,
     pub test_cmd: Option<String>,
     /// Cap on reasoning tokens per request; protects against runaway reasoning without limiting normal answers.
@@ -66,11 +68,22 @@ impl Config {
             fast: var("EMBER_MODEL_FAST", "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B"),
             coder: var("EMBER_MODEL_CODER", "nvidia/nemotron-3-super-120b-a12b"),
             reasoner: var("EMBER_MODEL_REASONER", "nvidia/Nemotron-3-Ultra-550b-a55b"),
+            draft: String::new(),
             fix_branches: var("EMBER_FIX_BRANCHES", "3").parse().unwrap_or(3).clamp(1, 4),
             test_cmd: env::var("EMBER_TEST_CMD").ok().filter(|v| !v.is_empty()),
             think_budget: None,
         }
         .with_budget()
+        .with_draft_model()
+    }
+
+    /// EMBER_MODEL_DRAFT, else Lightning on Token Factory (on real diffs and sessions it wrote commit messages and
+    /// /compact summaries as well as Super, about 5x cheaper), else the coder model.
+    fn with_draft_model(mut self) -> Self {
+        self.draft = env::var("EMBER_MODEL_DRAFT").ok().filter(|v| !v.is_empty()).unwrap_or_else(|| {
+            if self.base_url.contains("nebius.com") { "nvidia/Nemotron-3_5-Lightning".into() } else { self.coder.clone() }
+        });
+        self
     }
 
     /// EMBER_THINK_BUDGET=<tokens> or `off`. Default 4096 on Token Factory (where it is honored), none elsewhere.

@@ -12,6 +12,7 @@ from. The key is the only required setting for Token Factory.
 | `EMBER_MODEL_VISION` | `nvidia/Nemotron-3.5-Super-VL` |
 | `TAVILY_API_KEY` | unset; enables `web_search` |
 | `EMBER_MODEL_FAST` / `EMBER_MODEL_CODER` / `EMBER_MODEL_REASONER` | the models in the [model table](../README.md#how-it-uses-nemotron-on-nebius-token-factory) |
+| `EMBER_MODEL_DRAFT` | `nvidia/Nemotron-3_5-Lightning` on Token Factory, else the coder model: commit messages, branch names, PR text and `/compact` summaries |
 | `EMBER_FIX_BRANCHES` | `3` (1 to 4) |
 | `EMBER_THINK` | `on`; `low` or `off` for faster, shallower replies (same as `--think` / `/think`) |
 | `EMBER_THINK_BUDGET` | `4096` reasoning tokens per request on Token Factory, no cap elsewhere; a number, or `off` |

@@ -112,6 +112,7 @@ pub async fn commit(client: Client, model: String, dir: &Path, hint: String, tx:
         &tx,
     )
     .await?;
+    let message = wrap_body(&message, 72);
     show(&tx, format!("**Proposed commit**\n```\n{message}\n```"));
     if ask(&tx, "Commit with this message".into(), None, None).await == Decision::No {
         bail!("commit cancelled; the changes are still staged");
@@ -223,4 +224,50 @@ pub async fn pr(client: Client, model: String, dir: &Path, tx: Events) -> Result
     }
     let _ = tx.send(AgentEvent::Notice(format!("Opened {}", String::from_utf8_lossy(&out.stdout).trim())));
     Ok(())
+}
+
+/// Wrap a commit message's body at `width` columns (models don't reliably do it). The subject line, code and
+/// indented lines are left alone; list items keep a hanging indent.
+fn wrap_body(message: &str, width: usize) -> String {
+    let mut lines = message.lines();
+    let mut out = vec![lines.next().unwrap_or("").to_string()];
+    for line in lines {
+        if line.chars().count() <= width || line.starts_with(' ') || line.starts_with('\t') {
+            out.push(line.to_string());
+            continue;
+        }
+        let indent = if line.starts_with("- ") || line.starts_with("* ") { "  " } else { "" };
+        let mut current = String::new();
+        for word in line.split(' ') {
+            if !current.is_empty() && current.chars().count() + 1 + word.chars().count() > width {
+                out.push(std::mem::take(&mut current));
+                current.push_str(indent);
+            } else if !current.is_empty() && current != indent {
+                current.push(' ');
+            }
+            current.push_str(word);
+        }
+        out.push(current);
+    }
+    out.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wraps_commit_bodies_but_not_subjects_or_code() {
+        let long = "word ".repeat(30);
+        let msg = format!("A subject line that is longer than seventy-two characters stays on one line\n\n{long}\n- {long}\n    {long}");
+        let wrapped = wrap_body(&msg, 72);
+        let lines: Vec<&str> = wrapped.lines().collect();
+        assert!(lines[0].len() > 72, "the subject must not be wrapped");
+        assert!(lines[1].is_empty());
+        let (body, code): (Vec<&str>, Vec<&str>) = lines[2..].iter().partition(|l| !l.starts_with("    "));
+        assert!(body.iter().all(|l| l.chars().count() <= 72), "{wrapped}");
+        assert!(body.iter().any(|l| l.starts_with("- word")) && body.iter().any(|l| l.starts_with("  word")), "{wrapped}");
+        assert_eq!(code.len(), 1, "indented lines stay as they are");
+        assert_eq!(wrap_body("short\n\nbody", 72), "short\n\nbody");
+    }
 }
