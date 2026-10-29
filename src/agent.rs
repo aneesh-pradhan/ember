@@ -180,7 +180,7 @@ pub struct Agent {
     title: String,
     last_prompt_tokens: u64,
     checkpoints: Vec<Checkpoint>,
-    /// Send each step's reasoning back to the model within the task (EMBER_KEEP_REASONING=1).
+    /// Send each step's reasoning back to the model within the task (EMBER_KEEP_REASONING=0 turns it off).
     keep_reasoning: bool,
 }
 
@@ -200,7 +200,7 @@ impl Agent {
             title: String::new(),
             last_prompt_tokens: 0,
             checkpoints: vec![],
-            keep_reasoning: matches!(std::env::var("EMBER_KEEP_REASONING").as_deref(), Ok("1" | "true" | "on")),
+            keep_reasoning: !matches!(std::env::var("EMBER_KEEP_REASONING").as_deref(), Ok("0" | "false" | "off")),
         };
         agent.reset();
         agent
