@@ -490,15 +490,18 @@ impl Agent {
         tools::one_line(input, 60)
     }
 
-    /// Remember a file's contents before its first edit in this turn.
+    /// Remember each file's contents before its first edit in this turn (every file in a batched edit).
     fn snapshot(&mut self, name: &str, args: &serde_json::Value) {
-        if !matches!(name, "edit_file" | "write_file") {
-            return;
-        }
-        let Ok(path) = self.ws.resolve(args["path"].as_str().unwrap_or("")) else { return };
+        let paths: Vec<String> = match name {
+            "edit_file" => tools::edit_list(args).into_iter().map(|e| e.path).collect(),
+            "write_file" => vec![args["path"].as_str().unwrap_or("").to_string()],
+            _ => return,
+        };
         let Some(checkpoint) = self.checkpoints.last_mut() else { return };
-        if !checkpoint.files.iter().any(|(p, _)| *p == path) {
-            checkpoint.files.push((path.clone(), std::fs::read(&path).ok()));
+        for path in paths.iter().filter_map(|p| self.ws.resolve(p).ok()) {
+            if !checkpoint.files.iter().any(|(p, _)| *p == path) {
+                checkpoint.files.push((path.clone(), std::fs::read(&path).ok()));
+            }
         }
     }
 
@@ -778,7 +781,8 @@ pub fn system_prompt(root: &Path) -> String {
          - Explore before you change anything: use list_files, grep and read_file to find the relevant code. \
            Never guess file contents or paths.\n\
          - You make one tool call per reply, so batch: read every file you need in a single read_file call with \
-           `paths`, and combine related searches into one grep pattern with `|`.\n\
+           `paths`, combine related searches into one grep pattern with `|`, and make every planned change in one \
+           edit_file call with `edits`.\n\
          - For tasks with three or more steps, keep a task list with update_todos and update it as you go.\n\
          - Make focused changes with edit_file, matching the existing style. Use write_file only for new files.\n\
          - After changing code, build or run the relevant tests with bash and fix what you broke.\n\
