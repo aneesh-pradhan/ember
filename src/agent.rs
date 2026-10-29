@@ -797,6 +797,9 @@ pub fn system_prompt(root: &Path) -> String {
            edit_file call with `edits`.\n\
          - For tasks with three or more steps, keep a task list with update_todos and update it as you go.\n\
          - Make focused changes with edit_file, matching the existing style. Use write_file only for new files.\n\
+         - For a bug report, reproduce the problem before changing code: write a minimal example that shows the \
+           wrong behavior, even when the report describes another project's files or setup. Don't conclude there \
+           is nothing to fix until a reproduction shows the behavior is already correct.\n\
          - After changing code, build or run the relevant tests with bash and fix what you broke.\n\
          - Mutating actions ask the user for approval. If they decline, stop and ask how to proceed.\n\
          - Do not commit, push, or delete files unless asked.\n\
