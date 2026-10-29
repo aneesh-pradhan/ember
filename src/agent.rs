@@ -401,6 +401,19 @@ impl Agent {
         self.checkpoints.push(Checkpoint { label: self.title_for(&content), files: vec![] });
         self.push_input(content);
         let result = self.run_steps(tx, plan).await;
+        // Say where new files went: the model often names them only relative to a working directory the user
+        // may not have in mind (it would rather write "saved as index.html" than give the path).
+        if let Some(checkpoint) = self.checkpoints.last() {
+            let created: Vec<String> = checkpoint
+                .files
+                .iter()
+                .filter(|(path, before)| before.is_none() && path.is_file())
+                .map(|(path, _)| path.display().to_string())
+                .collect();
+            if !created.is_empty() {
+                let _ = tx.send(AgentEvent::Notice(format!("New files: {}", created.join(", "))));
+            }
+        }
         if self.checkpoints.last().is_some_and(|c| c.files.is_empty()) {
             self.checkpoints.pop();
         }
