@@ -1,6 +1,6 @@
 [package]
 name = "ember"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 rust-version = "1.80"
 description = "A terminal coding agent powered by NVIDIA Nemotron on Nebius Token Factory"
