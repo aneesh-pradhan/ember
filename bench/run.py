@@ -44,6 +44,7 @@ CONFIGS = {
     "super-off": {"EMBER_MODEL_CODER": SUPER, "EMBER_THINK": "off"},
     "super-keep": {"EMBER_MODEL_CODER": SUPER, "EMBER_KEEP_REASONING": "1"},
     "super-nokeep": {"EMBER_MODEL_CODER": SUPER, "EMBER_KEEP_REASONING": "0"},
+    "super-nomap": {"EMBER_MODEL_CODER": SUPER, "EMBER_REPO_MAP": "0"},
     "super-nobudget": {"EMBER_MODEL_CODER": SUPER, "EMBER_THINK_BUDGET": "off"},
     "ultra": {"EMBER_MODEL_CODER": ULTRA},
     "nano": {"EMBER_MODEL_CODER": NANO},
