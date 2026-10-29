@@ -19,6 +19,16 @@ These choices come from measuring the models on Token Factory, not from defaults
   request), billed at a lower rate. ember keeps the system prompt and the tool list fixed for each turn, so the
   growing conversation is re-sent as a stable prefix, and `/usage` shows how much input came from the cache (up to
   99% on warm runs).
+- **Follow-ups extend the prompt instead of starting a new user turn.** Token Factory only credits cached tokens
+  when everything up to and including the last user message matches an earlier request: the same 5.4k-token system
+  prompt followed by a different user message got 0 cached tokens in 6 of 6 tries (with or without
+  `prompt_cache_key`), and so did prompts diverging at 50%, 90% or 99% of the system prompt, while each tool step
+  of a task cached about 99%. Nemotron's chat template adds to this: once a newer user message exists it re-renders
+  earlier replies (stripping their reasoning, and with different whitespace even when there is none). So a new user
+  message re-bills the whole conversation at the full input price. In the full-screen UI, ember gives the model an
+  `ask_user` tool and sends each follow-up as that tool's result, adding the call to a plain text reply (which no
+  request has included yet). On a replayed two-turn exchange the follow-up went from 0% to 98% cached, and Super
+  responded the same way (it edited the file in both cases).
 - **Reasoning is kept between steps.** Within a task, ember sends each step's `reasoning_content` back to the model,
   so Super doesn't re-derive its plan after every tool result. On the coding benchmark below, this cut model calls
   from 8.3 to 6.2 per task, input tokens by a third and output tokens by almost half, at the same pass rate

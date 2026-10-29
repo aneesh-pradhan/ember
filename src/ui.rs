@@ -136,7 +136,7 @@ pub async fn run(
     let client = config.client();
     let model = Arc::new(Mutex::new(config.coder.clone()));
     let mode = SharedMode::new(mode);
-    let agent = Agent::new(client.clone(), model.clone(), mode.clone(), Workspace::new(cwd.clone()));
+    let agent = Agent::new(client.clone(), model.clone(), mode.clone(), Workspace::new(cwd.clone())).interactive();
     *agent.think.lock().unwrap() = think;
     let (mcp, mcp_cwd) = (agent.mcp.clone(), cwd.clone());
     tokio::spawn(async move { mcp.start(&mcp_cwd).await });
