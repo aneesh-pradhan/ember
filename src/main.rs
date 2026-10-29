@@ -8,6 +8,8 @@ mod llm;
 mod logo;
 mod markdown;
 mod mcp;
+#[cfg(test)]
+mod mock;
 mod session;
 mod theme;
 mod tools;
