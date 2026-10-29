@@ -120,6 +120,7 @@ async fn print_mode(config: Config, cwd: std::path::PathBuf, prompt: String, yes
                 out.flush()?;
             }
             AgentEvent::Reply { content, .. } if !content.is_empty() => println!(),
+            AgentEvent::Retrying(why) => eprintln!("[retry] {why}"),
             AgentEvent::ToolDone { summary, ok, .. } => {
                 tools += 1;
                 eprintln!("[{}] {summary}", if ok { "ok" } else { "failed" })
