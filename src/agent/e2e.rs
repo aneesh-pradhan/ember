@@ -150,3 +150,29 @@ async fn edits_wait_for_approval() {
     turn(&mut approved, "create new.txt", Decision::Yes).await;
     assert_eq!(std::fs::read_to_string(dir.join("new.txt")).unwrap(), "hello\n");
 }
+
+/// One edit_file call with several edits: one approval, every file changed, and /undo restores them all.
+#[tokio::test]
+async fn batched_edits_need_one_approval_and_undo_together() {
+    let dir = project(&[("a.py", "x = 1\n"), ("b.py", "print(x)\n")]);
+    let edits = json!({"edits": [
+        {"path": "a.py", "old_string": "x = 1", "new_string": "x = 2"},
+        {"path": "b.py", "old_string": "print(x)", "new_string": "print(x * 2)"}]});
+    let model = MockModel::start(vec![Reply::Tools(vec![call("edit_file", edits)]), Reply::Text("Done.")]).await;
+    let mut a = agent(&model, &dir, Mode::Ask);
+    let events = turn(&mut a, "double it", Decision::Yes).await;
+
+    let prompts: Vec<_> = events.iter().filter_map(|e| match e {
+        AgentEvent::Notice(n) if n.starts_with("approval") => Some(n.clone()),
+        _ => None,
+    }).collect();
+    assert_eq!(prompts, ["approval: Edit a.py, b.py (2 edits)"]);
+    let read = |f: &str| std::fs::read_to_string(dir.join(f)).unwrap();
+    assert_eq!((read("a.py"), read("b.py")), ("x = 2\n".into(), "print(x * 2)\n".into()));
+    let result = &tool_results(&model.requests()[1])[0];
+    assert!(result.contains("b/a.py") && result.contains("b/b.py"), "{result}");
+
+    let (_, restored) = a.undo().expect("undo");
+    assert_eq!(restored, ["a.py", "b.py"]);
+    assert_eq!((read("a.py"), read("b.py")), ("x = 1\n".into(), "print(x)\n".into()));
+}

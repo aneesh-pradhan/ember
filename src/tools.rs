@@ -122,14 +122,23 @@ pub fn specs(read_only: bool) -> Vec<ToolSpec> {
         specs.extend([
             ToolSpec::new(
                 "edit_file",
-                "Replace an exact snippet in a file. old_string must match the file exactly (including indentation) \
-                 and be unique unless replace_all is true. Read the file first.",
+                "Replace exact snippets in files. Each old_string must match the file exactly (including \
+                 indentation) and be unique unless replace_all is true. Read files first. Send one edit with path, \
+                 old_string and new_string, or several with `edits`: put every change you have planned, across \
+                 any files, in one call (a top-level path applies to edits that don't name one). Edits to the same file apply in order, and if any edit fails, none are \
+                 applied.",
                 json!({"type": "object", "properties": {
                     "path": {"type": "string"},
                     "old_string": {"type": "string", "description": "Exact text to replace"},
                     "new_string": {"type": "string", "description": "Replacement text"},
-                    "replace_all": {"type": "boolean", "description": "Replace every occurrence"}},
-                    "required": ["path", "old_string", "new_string"]}),
+                    "replace_all": {"type": "boolean", "description": "Replace every occurrence"},
+                    "edits": {"type": "array", "description": "Several edits applied together", "items": {
+                        "type": "object", "properties": {
+                            "path": {"type": "string"},
+                            "old_string": {"type": "string"},
+                            "new_string": {"type": "string"},
+                            "replace_all": {"type": "boolean"}},
+                        "required": ["path", "old_string", "new_string"]}}}}),
             ),
             ToolSpec::new(
                 "write_file",
@@ -163,7 +172,17 @@ pub fn summary(name: &str, args: &Value) -> String {
         "read_file" => format!("Read {}", read_paths(args).join(", ")),
         "list_files" => format!("List {} {}", if s(args, "path").is_empty() { "." } else { s(args, "path") }, s(args, "glob")).trim_end().to_string(),
         "grep" => format!("Search /{}/ {}", s(args, "pattern"), s(args, "glob")).trim_end().to_string(),
-        "edit_file" => format!("Edit {}", s(args, "path")),
+        "edit_file" => {
+            let edits = edit_list(args);
+            let mut paths: Vec<&str> = vec![];
+            for e in &edits {
+                if !paths.contains(&e.path.as_str()) {
+                    paths.push(&e.path);
+                }
+            }
+            let count = if edits.len() > 1 { format!(" ({} edits)", edits.len()) } else { String::new() };
+            format!("Edit {}{count}", paths.join(", "))
+        }
         "write_file" => format!("Write {}", s(args, "path")),
         "bash" => format!("Run `{}`", one_line(s(args, "command"), 100)),
         "web_search" => format!("Web search \"{}\"", one_line(s(args, "query"), 80)),
@@ -177,10 +196,8 @@ pub fn summary(name: &str, args: &Value) -> String {
 pub fn preview(ws: &Workspace, name: &str, args: &Value) -> Option<String> {
     match name {
         "edit_file" => {
-            let path = ws.resolve(s(args, "path")).ok()?;
-            let old = std::fs::read_to_string(&path).ok()?;
-            let new = apply_edit(&old, s(args, "old_string"), s(args, "new_string"), args["replace_all"].as_bool().unwrap_or(false)).ok()?;
-            Some(diff(&ws.rel(&path), &old, &new))
+            let changes = plan_edits(ws, &edit_list(args)).ok()?;
+            Some(changes.iter().map(|c| diff(&ws.rel(&c.path), &c.old, &c.new)).collect())
         }
         "write_file" => {
             let path = ws.resolve(s(args, "path")).ok()?;
@@ -446,14 +463,70 @@ fn replace_reindented(lines: &[&str], needle: &[&str], new: &str) -> Option<Stri
     Some(out)
 }
 
+/// One replacement requested of edit_file.
+pub struct Edit {
+    pub path: String,
+    old_string: String,
+    new_string: String,
+    replace_all: bool,
+}
+
+/// The edits in an edit_file call: the `edits` list, or the single path/old_string/new_string form. A top-level
+/// `path` applies to every edit that doesn't name its own (Nemotron sends that shape for several edits to one file).
+pub fn edit_list(args: &Value) -> Vec<Edit> {
+    let one = |v: &Value| Edit {
+        path: Some(s(v, "path")).filter(|p| !p.is_empty()).unwrap_or(s(args, "path")).to_string(),
+        old_string: s(v, "old_string").to_string(),
+        new_string: s(v, "new_string").to_string(),
+        replace_all: v["replace_all"].as_bool().unwrap_or(false),
+    };
+    match args["edits"].as_array().filter(|e| !e.is_empty()) {
+        Some(edits) => edits.iter().map(one).collect(),
+        None => vec![one(args)],
+    }
+}
+
+/// A file's contents before and after a set of edits.
+struct Change {
+    path: PathBuf,
+    old: String,
+    new: String,
+}
+
+/// Apply edits in memory, in order (later edits to a file see earlier ones), so nothing is written unless every
+/// edit applies. Files keep the order they were first mentioned in.
+fn plan_edits(ws: &Workspace, edits: &[Edit]) -> Result<Vec<Change>, String> {
+    let mut changes: Vec<Change> = vec![];
+    for (i, edit) in edits.iter().enumerate() {
+        let which = if edits.len() > 1 { format!("Edit {} of {} ({}): ", i + 1, edits.len(), edit.path) } else { String::new() };
+        let fail = |e: String| {
+            let rest = if edits.len() > 1 { " No files were changed." } else { "" };
+            format!("{which}{e}{rest}")
+        };
+        if edit.path.trim().is_empty() {
+            return Err(fail("no path given for this edit".into()));
+        }
+        let path = ws.resolve(&edit.path).map_err(fail)?;
+        check_writable(ws, &ws.rel(&path)).map_err(fail)?;
+        let pos = match changes.iter().position(|c| c.path == path) {
+            Some(pos) => pos,
+            None => {
+                let old = std::fs::read_to_string(&path).map_err(|e| fail(format!("{}: {e}", edit.path)))?;
+                changes.push(Change { path, new: old.clone(), old });
+                changes.len() - 1
+            }
+        };
+        changes[pos].new = apply_edit(&changes[pos].new, &edit.old_string, &edit.new_string, edit.replace_all).map_err(fail)?;
+    }
+    Ok(changes)
+}
+
 fn edit_file(ws: &Workspace, args: &Value) -> Result<String, String> {
-    let rel = s(args, "path");
-    let path = ws.resolve(rel)?;
-    check_writable(ws, &ws.rel(&path))?;
-    let old = std::fs::read_to_string(&path).map_err(|e| format!("{rel}: {e}"))?;
-    let new = apply_edit(&old, s(args, "old_string"), s(args, "new_string"), args["replace_all"].as_bool().unwrap_or(false))?;
-    std::fs::write(&path, &new).map_err(|e| e.to_string())?;
-    Ok(diff(&ws.rel(&path), &old, &new))
+    let changes = plan_edits(ws, &edit_list(args))?;
+    for c in &changes {
+        std::fs::write(&c.path, &c.new).map_err(|e| format!("{}: {e}", ws.rel(&c.path)))?;
+    }
+    Ok(changes.iter().map(|c| diff(&ws.rel(&c.path), &c.old, &c.new)).collect())
 }
 
 fn write_file(ws: &Workspace, args: &Value) -> Result<String, String> {
@@ -609,6 +682,52 @@ mod tests {
         assert!(out.contains("==> a.txt <==") && out.contains("alpha") && out.contains("beta"));
         assert!(out.contains("==> missing.txt <==\nError:"));
         assert_eq!(read_file(&ws, &json!({"path": "a.txt"})).unwrap(), "     1\talpha\n");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn batched_edits_apply_together_or_not_at_all() {
+        let dir = std::env::temp_dir().join(format!("ember-edits-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let reset = || {
+            std::fs::write(dir.join("a.py"), "x = 1\ny = 2\n").unwrap();
+            std::fs::write(dir.join("b.py"), "print(x)\n").unwrap();
+        };
+        let ws = Workspace::new(dir.clone());
+        let read = |f: &str| std::fs::read_to_string(dir.join(f)).unwrap();
+
+        // Several files, and two edits to one file applied in order.
+        reset();
+        let args = json!({"edits": [
+            {"path": "a.py", "old_string": "x = 1", "new_string": "x = 10"},
+            {"path": "b.py", "old_string": "print(x)", "new_string": "print(x, y)"},
+            {"path": "a.py", "old_string": "x = 10\ny = 2", "new_string": "x = 10\ny = 20"}]});
+        assert_eq!(summary("edit_file", &args), "Edit a.py, b.py (3 edits)");
+        let out = edit_file(&ws, &args).unwrap();
+        assert!(out.contains("b/a.py") && out.contains("b/b.py"));
+        assert_eq!((read("a.py"), read("b.py")), ("x = 10\ny = 20\n".into(), "print(x, y)\n".into()));
+
+        // One failing edit leaves every file untouched and says which edit failed.
+        reset();
+        let err = edit_file(&ws, &json!({"edits": [
+            {"path": "a.py", "old_string": "x = 1", "new_string": "x = 10"},
+            {"path": "b.py", "old_string": "nope", "new_string": "z"}]})).unwrap_err();
+        assert!(err.starts_with("Edit 2 of 2 (b.py): ") && err.ends_with("No files were changed."), "{err}");
+        assert_eq!((read("a.py"), read("b.py")), ("x = 1\ny = 2\n".into(), "print(x)\n".into()));
+
+        // A top-level path covers edits that don't name one; an edit with no path at all is a clear error.
+        reset();
+        edit_file(&ws, &json!({"path": "a.py", "edits": [
+            {"old_string": "x = 1", "new_string": "x = 5"},
+            {"path": "b.py", "old_string": "print(x)", "new_string": "print(-x)"}]})).unwrap();
+        assert_eq!((read("a.py"), read("b.py")), ("x = 5\ny = 2\n".into(), "print(-x)\n".into()));
+        let err = edit_file(&ws, &json!({"edits": [{"old_string": "a", "new_string": "b"}]})).unwrap_err();
+        assert!(err.contains("no path given"), "{err}");
+
+        // The single-edit form still works.
+        reset();
+        assert!(edit_file(&ws, &json!({"path": "a.py", "old_string": "y = 2", "new_string": "y = 3"})).is_ok());
+        assert_eq!(read("a.py"), "x = 1\ny = 3\n");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
