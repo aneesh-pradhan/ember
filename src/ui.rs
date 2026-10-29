@@ -55,6 +55,7 @@ const COMMANDS: &[(&str, &str, bool)] = &[
     ("theme", "switch ember's look: kawaii (pastel, sparkles, kaomoji) or classic", true),
     ("mcp", "show connected MCP servers and their tools", false),
     ("usage", "token usage per model this session", false),
+    ("permissions", "what runs without asking; /permissions save keeps it for this project, /permissions forget clears it", true),
     ("help", "show commands and keys", false),
     ("quit", "exit ember", false),
 ];
@@ -275,6 +276,56 @@ impl App {
 
     fn print_notice(&mut self, text: impl Into<String>) {
         self.print_line(notice(text));
+    }
+
+    /// `/permissions`: list what runs without asking; `save` keeps it for this project, `forget` clears it.
+    fn permissions(&mut self, arg: &str) {
+        if !matches!(arg, "" | "save" | "forget") {
+            self.print_notice("Use /permissions, /permissions save or /permissions forget.");
+            return;
+        }
+        if !arg.is_empty() && self.busy() {
+            return;
+        }
+        let agent = self.agent.clone();
+        let Ok(mut agent) = agent.try_lock() else {
+            self.print_notice("ember is busy; try again when the current task finishes.");
+            return;
+        };
+        let result = match arg {
+            "" => Ok(None),
+            keep => agent.save_permissions(keep == "save").map(Some),
+        };
+        let allowed = agent.allowed();
+        drop(agent);
+        match result {
+            Err(e) => {
+                self.print_notice(format!("Couldn't save permissions: {e:#}"));
+                return;
+            }
+            Ok(Some(file)) if arg == "save" => self.print_notice(format!("Saved for this project in {}.", file.display())),
+            Ok(Some(_)) => self.print_notice("Forgot this project's saved permissions; ember will ask again."),
+            Ok(None) => {}
+        }
+        if allowed.is_empty() {
+            self.print_notice("Edits and commands ask first. Choose \"always\" at a prompt to allow more for this session.");
+            return;
+        }
+        let mut lines = vec![Line::styled("  Allowed without asking:", theme::bold())];
+        for command in &allowed.commands {
+            lines.push(Line::styled(format!("    `{command}` commands"), theme::dim()));
+        }
+        for tool in &allowed.tools {
+            lines.push(Line::styled(format!("    {tool}"), theme::dim()));
+        }
+        if arg.is_empty() {
+            lines.push(Line::styled(
+                "  /permissions save keeps these for this project (in your ember config, not the repo); \
+                 /permissions forget clears them.",
+                theme::dim(),
+            ));
+        }
+        self.print(lines);
     }
 
     fn print_diff(&mut self, diff: &str, max: usize) {
@@ -815,6 +866,7 @@ impl App {
             }
             "theme" => self.set_theme(arg),
             "usage" | "cost" => self.print_usage(),
+            "permissions" => self.permissions(arg),
             "todos" => self.print_todos(),
             "diff" => self.print_git_diff(),
             "resume" => self.resume(arg),
