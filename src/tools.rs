@@ -99,11 +99,13 @@ pub fn specs(read_only: bool) -> Vec<ToolSpec> {
                 "required": ["pattern"]}),
         ),
     ];
-    specs.push(ToolSpec::new(
-        "web_fetch",
-        "Fetch a web page (documentation, an issue, a changelog) and return its readable text.",
-        json!({"type": "object", "properties": {"url": {"type": "string", "description": "http(s) URL"}}, "required": ["url"]}),
-    ));
+    if crate::web::enabled() {
+        specs.push(ToolSpec::new(
+            "web_fetch",
+            "Fetch a web page (documentation, an issue, a changelog) and return its readable text.",
+            json!({"type": "object", "properties": {"url": {"type": "string", "description": "http(s) URL"}}, "required": ["url"]}),
+        ));
+    }
     if crate::web::search_available() {
         specs.push(ToolSpec::new(
             "web_search",
@@ -206,6 +208,7 @@ pub async fn run(ws: &Workspace, name: &str, args: &Value) -> Result<String, Str
         "grep" => grep(ws, args),
         "edit_file" => edit_file(ws, args),
         "write_file" => write_file(ws, args),
+        "web_search" | "web_fetch" if !crate::web::enabled() => Err("web tools are turned off (EMBER_NO_WEB)".into()),
         "web_search" => crate::web::search(args).await,
         "web_fetch" => crate::web::fetch(args).await,
         "bash" => {
