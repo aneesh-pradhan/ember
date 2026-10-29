@@ -8,6 +8,7 @@ mod llm;
 mod logo;
 mod markdown;
 mod mcp;
+mod permissions;
 #[cfg(test)]
 mod mock;
 mod repomap;

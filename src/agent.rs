@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::{mpsc, oneshot};
@@ -227,6 +227,8 @@ pub struct Agent {
     interactive: bool,
     /// The model for /compact summaries; the current model when unset.
     draft_model: Option<String>,
+    /// Where approvals are saved per project (`/permissions save`); None when there's no config directory.
+    permissions_file: Option<PathBuf>,
 }
 
 impl Agent {
@@ -248,6 +250,7 @@ impl Agent {
             keep_reasoning: !matches!(std::env::var("EMBER_KEEP_REASONING").as_deref(), Ok("0" | "false" | "off")),
             interactive: false,
             draft_model: None,
+            permissions_file: crate::permissions::file(),
         };
         agent.reset();
         agent
@@ -255,8 +258,9 @@ impl Agent {
 
     pub fn reset(&mut self) {
         self.messages = vec![Message::system(system_prompt(&self.ws.root))];
-        self.always_tools.clear();
-        self.always_commands.clear();
+        let saved = self.permissions_file.as_deref().map(|f| crate::permissions::load_from(f, &self.ws.root)).unwrap_or_default();
+        self.always_tools = saved.tools.into_iter().collect();
+        self.always_commands = saved.commands.into_iter().collect();
         self.session_id = session::new_id();
         self.title.clear();
         self.last_prompt_tokens = 0;
@@ -279,6 +283,33 @@ impl Agent {
 
     pub fn with_draft_model(mut self, model: String) -> Self {
         self.draft_model = Some(model).filter(|m| !m.is_empty());
+        self
+    }
+
+    /// What runs without asking right now: approvals from this session plus the project's saved ones.
+    pub fn allowed(&self) -> crate::permissions::Allowed {
+        crate::permissions::Allowed {
+            commands: self.always_commands.iter().cloned().collect(),
+            tools: self.always_tools.iter().cloned().collect(),
+        }
+    }
+
+    /// Keep this session's approvals for the project (`/permissions save`), or forget the saved ones and this
+    /// session's (`/permissions forget`). Returns the file they're saved in.
+    pub fn save_permissions(&mut self, keep: bool) -> Result<PathBuf> {
+        if !keep {
+            self.always_commands.clear();
+            self.always_tools.clear();
+        }
+        let file = self.permissions_file.clone().context("couldn't find a config directory")?;
+        crate::permissions::save_to(&file, &self.ws.root, &self.allowed())?;
+        Ok(file)
+    }
+
+    #[cfg(test)]
+    fn with_permissions_file(mut self, file: PathBuf) -> Self {
+        self.permissions_file = Some(file);
+        self.reset();
         self
     }
 
