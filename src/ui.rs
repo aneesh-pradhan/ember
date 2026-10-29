@@ -306,6 +306,11 @@ impl App {
         match event {
             AgentEvent::Text(t) => self.live_text.push_str(&t),
             AgentEvent::Reasoning(r) => self.live_reasoning.push_str(&r),
+            AgentEvent::Retrying(why) => {
+                self.live_text.clear();
+                self.live_reasoning.clear();
+                self.print_line(Line::styled(format!("  ↻ Connection problem ({why})"), theme::code()));
+            }
             AgentEvent::Reply { content, thought_secs } => {
                 if let Some(secs) = thought_secs.filter(|s| *s >= 2.0) {
                     self.print_line(Line::styled(format!("  {} reasoned for {secs:.1}s", theme::glyphs().reasoning), theme::dim()));

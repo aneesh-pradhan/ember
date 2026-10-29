@@ -185,6 +185,42 @@ pub struct Response {
 pub enum Delta<'a> {
     Text(&'a str),
     Reasoning(&'a str),
+    /// The request failed and is being sent again; anything streamed so far will be replaced.
+    Retry(&'a str),
+}
+
+/// Retries after a dropped connection, a stalled stream, or a 429/5xx response.
+const MAX_RETRIES: u32 = 3;
+
+fn backoff(attempt: u32) -> Duration {
+    if cfg!(test) { Duration::from_millis(10) } else { Duration::from_secs(1 << (attempt - 1)) }
+}
+
+/// A non-success HTTP response from the model API.
+#[derive(Debug)]
+struct ApiStatus {
+    status: reqwest::StatusCode,
+    body: String,
+}
+
+impl std::fmt::Display for ApiStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "API error {}: {}", self.status, self.body.trim())
+    }
+}
+
+impl std::error::Error for ApiStatus {}
+
+/// Worth sending again: connection and stream failures, rate limits and server errors. Other API errors (a bad
+/// request, a missing key) would fail the same way again.
+fn retryable(e: &anyhow::Error) -> bool {
+    if let Some(status) = e.downcast_ref::<ApiStatus>() {
+        return status.status.as_u16() == 429 || status.status.is_server_error();
+    }
+    e.chain().any(|c| {
+        c.downcast_ref::<reqwest::Error>()
+            .is_some_and(|r| r.is_timeout() || r.is_connect() || r.is_request() || r.is_body() || r.is_decode())
+    })
 }
 
 #[derive(Clone)]
@@ -291,31 +327,33 @@ impl Client {
     }
 
     /// Stream a chat completion; `on_delta` sees visible text and reasoning as it arrives.
+    /// Stream a completion, sending the request again (up to MAX_RETRIES times) if the connection fails, the
+    /// stream stalls or breaks, or the API returns 429/5xx. `on_delta` gets `Delta::Retry` before each retry.
     pub async fn stream(&self, req: &Request, mut on_delta: impl FnMut(Delta)) -> Result<Response> {
         let mut body = serde_json::to_value(req)?;
         self.tune(&mut body);
         body["stream"] = json!(true);
         body["stream_options"] = json!({"include_usage": true});
-
         let mut attempt = 0;
-        let resp = loop {
-            let resp = self
-                .auth(self.http.post(format!("{}chat/completions", self.base_url)))?
-                .json(&body)
-                .send()
-                .await?;
-            let status = resp.status();
-            if status.is_success() {
-                break resp;
+        loop {
+            match self.stream_once(&body, &mut on_delta).await {
+                Err(e) if attempt < MAX_RETRIES && retryable(&e) => {
+                    attempt += 1;
+                    on_delta(Delta::Retry(&format!("{e:#}; retrying ({attempt}/{MAX_RETRIES})")));
+                    tokio::time::sleep(backoff(attempt)).await;
+                }
+                result => return result,
             }
-            let text = resp.text().await.unwrap_or_default();
-            if (status.as_u16() == 429 || status.is_server_error()) && attempt < 3 {
-                tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
-                attempt += 1;
-                continue;
-            }
-            bail!("API error {status}: {}", text.trim());
-        };
+        }
+    }
+
+    async fn stream_once(&self, body: &Value, on_delta: &mut impl FnMut(Delta)) -> Result<Response> {
+        let resp = self.auth(self.http.post(format!("{}chat/completions", self.base_url)))?.json(body).send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ApiStatus { status, body }.into());
+        }
 
         let started = Instant::now();
         let mut out = Response::default();
