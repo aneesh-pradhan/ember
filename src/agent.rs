@@ -779,6 +779,13 @@ pub fn system_prompt(root: &Path) -> String {
         }
         None => "Not a git repository.".into(),
     };
+    // Saves the model several round trips of guessing how this project runs its tests.
+    let tests = std::env::var("EMBER_TEST_CMD")
+        .ok()
+        .filter(|c| !c.trim().is_empty())
+        .or_else(|| crate::fix::detect_test_command(root))
+        .map(|cmd| format!("\nTest command: `{cmd}` (add a test file, module or path to run only part of the suite)"))
+        .unwrap_or_default();
     let map = crate::repomap::build(root)
         .map(|m| format!("\n\n# Project map (files and top-level definitions; read files for details)\n{m}"))
         .unwrap_or_default();
@@ -814,7 +821,7 @@ pub fn system_prompt(root: &Path) -> String {
          - When you finish a task, briefly say what you changed and how you verified it, including anything \
            that failed or that you could not check.\n\n\
          # Environment\n\
-         Working directory: {}\nOS: {}\nDate: {date}\n{git}{map}{instructions}",
+         Working directory: {}\nOS: {}\nDate: {date}{tests}\n{git}{map}{instructions}",
         root.display(),
         std::env::consts::OS,
     )

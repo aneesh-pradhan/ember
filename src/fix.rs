@@ -174,6 +174,12 @@ pub fn detect_test_command(dir: &Path) -> Option<String> {
         Some("cargo test --quiet".into())
     } else if has("go.mod") {
         Some("go test ./...".into())
+    } else if has("tests/runtests.py") {
+        // Django (and projects copying its layout) run tests through their own script; pytest can't load them.
+        Some("python tests/runtests.py".into())
+    } else if has("bin/test") && has("setup.py") {
+        // SymPy's runner.
+        Some("python bin/test".into())
     } else if ["pyproject.toml", "setup.py", "setup.cfg", "pytest.ini", "tox.ini"].iter().any(|f| has(f)) {
         Some("python -m pytest -q -p no:cacheprovider".into())
     } else if has("package.json") {
@@ -765,4 +771,29 @@ pub fn tail(text: &str, max: usize) -> String {
         start += 1;
     }
     format!("...\n{}", &text[start..])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_project_test_runners() {
+        let dir = std::env::temp_dir().join(format!("ember-detect-{}", std::process::id()));
+        let detect = |files: &[&str]| {
+            let _ = std::fs::remove_dir_all(&dir);
+            for f in files {
+                let path = dir.join(f);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, "").unwrap();
+            }
+            detect_test_command(&dir)
+        };
+        assert_eq!(detect(&["setup.py", "tests/runtests.py"]).as_deref(), Some("python tests/runtests.py"));
+        assert_eq!(detect(&["setup.py", "bin/test"]).as_deref(), Some("python bin/test"));
+        assert_eq!(detect(&["pyproject.toml"]).as_deref(), Some("python -m pytest -q -p no:cacheprovider"));
+        assert_eq!(detect(&["Cargo.toml", "tests/runtests.py"]).as_deref(), Some("cargo test --quiet"));
+        assert_eq!(detect(&["README.md"]), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
