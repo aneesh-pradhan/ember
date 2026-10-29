@@ -17,6 +17,12 @@ pub enum Reply {
     Tools(Vec<(&'static str, String)>),
     /// Text that stops at the output token limit (`finish_reason: "length"`).
     CutOff(&'static str),
+    /// Close the connection without answering, like a network drop.
+    Drop,
+    /// Start streaming this text, then break the connection mid-reply.
+    Broken(&'static str),
+    /// Answer with this HTTP status and error body.
+    Status(u16),
 }
 
 /// A tool call reply with JSON arguments.
@@ -44,10 +50,22 @@ impl MockModel {
                     let Some(body) = read_request(&mut socket).await else { return };
                     recorded.lock().unwrap().push(body);
                     let reply = script.lock().unwrap().pop_front().unwrap_or(Reply::Text("MOCK: out of scripted replies"));
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{}",
-                        sse(&reply)
-                    );
+                    let response = match reply {
+                        Reply::Drop => return,
+                        Reply::Status(code) => format!(
+                            "HTTP/1.1 {code} Mock\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+                        ),
+                        // Promise more body than is sent, so the client sees the stream break.
+                        Reply::Broken(text) => {
+                            let partial = sse(&Reply::Text(text));
+                            let partial = &partial[..partial.find("\n\n").unwrap() + 2];
+                            format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 100000\r\n\r\n{partial}")
+                        }
+                        ref reply => format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{}",
+                            sse(reply)
+                        ),
+                    };
                     let _ = socket.write_all(response.as_bytes()).await;
                     let _ = socket.shutdown().await;
                 });
@@ -103,6 +121,7 @@ fn sse(reply: &Reply) -> String {
             events.push(choice(json!({"content": b}), None));
             events.push(choice(json!({}), Some(if matches!(reply, Reply::CutOff(_)) { "length" } else { "stop" })));
         }
+        Reply::Drop | Reply::Broken(_) | Reply::Status(_) => unreachable!("not a streamed reply"),
         Reply::Tools(calls) => {
             for (i, (name, args)) in calls.iter().enumerate() {
                 events.push(choice(

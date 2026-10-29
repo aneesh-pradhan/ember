@@ -77,6 +77,8 @@ pub struct Todo {
 pub enum AgentEvent {
     Text(String),
     Reasoning(String),
+    /// A model request failed and is being retried: drop what streamed so far.
+    Retrying(String),
     /// A model reply finished streaming.
     Reply { content: String, thought_secs: Option<f32> },
     ToolStart { summary: String },
@@ -431,6 +433,7 @@ impl Agent {
                     let _ = tx.send(match delta {
                         Delta::Text(t) => AgentEvent::Text(t.to_string()),
                         Delta::Reasoning(r) => AgentEvent::Reasoning(r.to_string()),
+                        Delta::Retry(why) => AgentEvent::Retrying(why.to_string()),
                     });
                 })
                 .await?;
@@ -682,6 +685,7 @@ impl Agent {
                     let _ = tx.send(match delta {
                         Delta::Text(t) => AgentEvent::Text(t.to_string()),
                         Delta::Reasoning(r) => AgentEvent::Reasoning(r.to_string()),
+                        Delta::Retry(why) => AgentEvent::Retrying(why.to_string()),
                     });
                 },
             )

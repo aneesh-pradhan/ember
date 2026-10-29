@@ -176,3 +176,26 @@ async fn batched_edits_need_one_approval_and_undo_together() {
     assert_eq!(restored, ["a.py", "b.py"]);
     assert_eq!((read("a.py"), read("b.py")), ("x = 1\n".into(), "print(x)\n".into()));
 }
+
+/// Dropped connections, a stream that breaks mid-reply and a 503 are retried; the reply that finally arrives is
+/// the only one kept. A 400 isn't retried.
+#[tokio::test]
+async fn retries_dropped_connections_broken_streams_and_server_errors() {
+    let dir = project(&[]);
+    let model = MockModel::start(vec![Reply::Drop, Reply::Broken("Half of an ans"), Reply::Status(503), Reply::Text("Full answer.")]).await;
+    let mut a = agent(&model, &dir, Mode::Ask);
+    let events = turn(&mut a, "hello", Decision::No).await;
+
+    assert_eq!(model.requests().len(), 4);
+    let retries = events.iter().filter(|e| matches!(e, AgentEvent::Retrying(_))).count();
+    assert_eq!(retries, 3);
+    assert_eq!(replies(&events), ["Full answer."]);
+    assert_eq!(a.messages.last().unwrap().content, "Full answer.");
+
+    let model = MockModel::start(vec![Reply::Status(400)]).await;
+    let mut a = agent(&model, &dir, Mode::Ask);
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let err = a.turn("hello".into(), &tx).await.unwrap_err();
+    assert!(format!("{err:#}").contains("API error 400"), "{err:#}");
+    assert_eq!(model.requests().len(), 1, "a 400 was retried");
+}
