@@ -139,7 +139,9 @@ pub async fn run(
     let client = config.client();
     let model = Arc::new(Mutex::new(config.coder.clone()));
     let mode = SharedMode::new(mode);
-    let agent = Agent::new(client.clone(), model.clone(), mode.clone(), Workspace::new(cwd.clone())).interactive();
+    let agent = Agent::new(client.clone(), model.clone(), mode.clone(), Workspace::new(cwd.clone()))
+        .interactive()
+        .with_draft_model(config.draft.clone());
     *agent.think.lock().unwrap() = think;
     let (mcp, mcp_cwd) = (agent.mcp.clone(), cwd.clone());
     tokio::spawn(async move { mcp.start(&mcp_cwd).await });
@@ -857,7 +859,7 @@ impl App {
                     return;
                 }
                 self.print_user(&format!("/{line}"));
-                let (client, tx, cwd, model) = (self.client.clone(), self.tx.clone(), self.cwd.clone(), self.config.coder.clone());
+                let (client, tx, cwd, model) = (self.client.clone(), self.tx.clone(), self.cwd.clone(), self.config.draft.clone());
                 let (kind, arg) = (name.to_string(), arg.to_string());
                 self.spawn(async move {
                     let result = match kind.as_str() {

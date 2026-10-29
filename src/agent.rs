@@ -225,6 +225,8 @@ pub struct Agent {
     keep_reasoning: bool,
     /// Offer `ask_user` and send follow-ups as its result (the full-screen UI; print mode has a single turn).
     interactive: bool,
+    /// The model for /compact summaries; the current model when unset.
+    draft_model: Option<String>,
 }
 
 impl Agent {
@@ -245,6 +247,7 @@ impl Agent {
             checkpoints: vec![],
             keep_reasoning: !matches!(std::env::var("EMBER_KEEP_REASONING").as_deref(), Ok("0" | "false" | "off")),
             interactive: false,
+            draft_model: None,
         };
         agent.reset();
         agent
@@ -271,6 +274,11 @@ impl Agent {
     /// For the full-screen UI: offer `ask_user` and send follow-up messages as its result.
     pub fn interactive(mut self) -> Self {
         self.interactive = true;
+        self
+    }
+
+    pub fn with_draft_model(mut self, model: String) -> Self {
+        self.draft_model = Some(model).filter(|m| !m.is_empty());
         self
     }
 
@@ -717,7 +725,7 @@ impl Agent {
             }
         }
         let transcript = crate::fix::tail(&transcript, 200_000);
-        let model = self.model.lock().unwrap().clone();
+        let model = self.draft_model.clone().unwrap_or_else(|| self.model.lock().unwrap().clone());
         let resp = self
             .client
             .stream(
