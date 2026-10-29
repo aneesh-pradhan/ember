@@ -1,4 +1,5 @@
 mod agent;
+mod animation;
 mod commands;
 mod config;
 mod fix;
