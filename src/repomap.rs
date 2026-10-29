@@ -23,12 +23,30 @@ pub fn build(root: &Path) -> Option<String> {
     if matches!(std::env::var("EMBER_REPO_MAP").as_deref(), Ok("0" | "off" | "false")) {
         return None;
     }
-    let files = crate::tools::project_files(root, SCAN_LIMIT);
+    let files: Vec<String> = crate::tools::project_files(root, SCAN_LIMIT).into_iter().filter(|f| !is_noise(f)).collect();
     if files.is_empty() {
         return None;
     }
     let map = if files.len() <= DETAILED_FILES { detailed(root, &files) } else { by_directory(&files) };
     Some(cap(&map))
+}
+
+/// Lockfiles, data, logs and binary assets: never the file the model needs to find, and they crowd out the ones it
+/// does. list_files still shows them.
+fn is_noise(file: &str) -> bool {
+    const LOCKFILES: &[&str] = &[
+        "Cargo.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb", "poetry.lock", "uv.lock",
+        "Pipfile.lock", "Gemfile.lock", "composer.lock", "go.sum", "flake.lock", "mix.lock", "pubspec.lock",
+    ];
+    const EXTENSIONS: &[&str] = &[
+        "jsonl", "ndjson", "csv", "tsv", "parquet", "arrow", "feather", "pkl", "npy", "npz", "h5", "sqlite", "sqlite3",
+        "db", "log", "png", "jpg", "jpeg", "gif", "webp", "ico", "bmp", "pdf", "zip", "gz", "tgz", "bz2", "xz", "7z",
+        "jar", "wasm", "so", "dylib", "dll", "exe", "o", "a", "class", "pyc", "woff", "woff2", "ttf", "otf", "mp3",
+        "mp4", "mov", "wav",
+    ];
+    let name = file.rsplit('/').next().unwrap_or(file);
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+    LOCKFILES.contains(&name) || EXTENSIONS.contains(&ext.as_str()) || name.ends_with(".min.js") || name.ends_with(".map")
 }
 
 /// Every file, with its top-level definitions where the language is known.
@@ -88,6 +106,13 @@ fn definitions(root: &Path, file: &str) -> Vec<String> {
              re(r"^(?:export )?(?:default )?(?:async )?(?:function\*? |class )([A-Za-z_$][\w$]*)|^(?:export )?(?:const|let) ([A-Za-z_$][\w$]*) = (?:async )?(?:\(|function)")),
             (&["go"][..], re(r"^(?:func (?:\([^)]*\) )?|type )([A-Za-z_][A-Za-z0-9_]*)")),
             (&["rb"][..], re(r"^(?:def|class|module) ([A-Za-z_][A-Za-z0-9_:?!]*)")),
+            // Types at the start of a line followed by a body or base list (not forward declarations), and function
+            // definitions: a return type, then a name and an argument list on a line with no `;` (so declarations
+            // and calls don't count).
+            (&["c", "h", "cc", "cpp", "cxx", "hh", "hpp", "hxx"][..],
+             re(r"^(?:template\s*<[^>]*>\s*)?(?:class|struct|enum(?: class)?|union|namespace) ([A-Za-z_]\w*)\s*(?:$|[:{]|final\b)|^(?:(?:static|inline|extern|constexpr|virtual|friend)\s+)*(?:const\s+)?[A-Za-z_][\w:<>,]*(?:\s*[*&]+\s*|\s+)((?:[A-Za-z_]\w*::)*~?[A-Za-z_]\w*)\s*\([^;]*$")),
+            (&["java", "kt", "cs"][..],
+             re(r"^(?:(?:public|private|protected|internal|abstract|final|static|sealed|partial|data|open)\s+)*(?:class|interface|enum|record|object|struct) ([A-Za-z_]\w*)")),
         ]
     });
     let ext = file.rsplit('.').next().unwrap_or("");
@@ -129,6 +154,36 @@ mod tests {
         assert!(map.contains("app/models.py: Invoice, helper, fetch"), "{map}");
         assert!(map.contains("web/ui.ts: render, go, App"), "{map}");
         assert!(map.lines().any(|l| l == "README.md"), "{map}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn maps_c_cpp_and_java_definitions() {
+        let dir = project("cpp", &[
+            ("src/graph.cpp", "#include \"graph.h\"\nint Graph::shortest(int a, int b) {\n  return helper(a);\n}\n\
+                               static void helper(int x)\n{\n}\nint main(int argc, char** argv) {\n}\nvoid declared(int);\n"),
+            ("src/graph.h", "#pragma once\nclass Graph {\npublic:\n  int shortest(int a, int b);\n};\nstruct Edge;\n\
+                             template <typename T>\nstruct Heap {\n};\nenum class Kind { A };\n"),
+            ("App.java", "package x;\npublic final class App {\n  public static void main(String[] a) {}\n}\n"),
+        ]);
+        let map = build(&dir).unwrap();
+        assert!(map.contains("src/graph.cpp: Graph::shortest, helper, main"), "{map}");
+        assert!(map.contains("src/graph.h: Graph, Heap, Kind"), "{map}");
+        assert!(map.contains("App.java: App"), "{map}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn skips_lockfiles_and_data_files() {
+        let dir = project("noise", &[
+            ("src/main.rs", "fn main() {}\n"),
+            ("Cargo.lock", "# lock\n"),
+            ("bench/results/run.jsonl", "{}\n"),
+            ("docs/logo.png", "png"),
+            ("web/app.min.js", "x"),
+        ]);
+        let map = build(&dir).unwrap();
+        assert_eq!(map, "src/main.rs: main");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
