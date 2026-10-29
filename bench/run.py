@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """ember coding benchmark: run ember on small coding tasks and score them with hidden tests.
 
-Each run copies examples/tinyledger to a fresh directory, gives ember the task in print mode with
-edits allowed, then adds the task's hidden test file and runs the full test suite. A task passes only
+Each run copies examples/tinyledger to a fresh directory (plus the task's optional setup/ files, e.g. a planted bug), gives
+ember the task in print mode with edits allowed, then adds the task's hidden test file and runs the full test suite. A task passes only
 if every test passes (the hidden ones and the existing ones). Cost uses Nebius Token Factory prices.
 
     python3 bench/run.py --ember target/release/ember --configs super super-low --runs 2
@@ -79,6 +79,8 @@ def run_one(ember: str, config: str, task: Path, timeout: int) -> dict:
     try:
         repo = work / "repo"
         shutil.copytree(PROJECT, repo, ignore=shutil.ignore_patterns("__pycache__", ".ember"))
+        if (task / "setup").is_dir():  # files that replace or add to the project, e.g. to plant a bug
+            shutil.copytree(task / "setup", repo, dirs_exist_ok=True)
         (repo / "AGENTS.md").write_text(f"Run the tests with: {TEST_CMD}\n")
         prompt = task.joinpath("task.md").read_text().strip() + "\nRun the tests when you're done."
         env = {**os.environ, **CONFIGS[config], "EMBER_MOUSE": "off"}
