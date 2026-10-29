@@ -70,8 +70,15 @@ fn print_fix_event(ev: crate::fix::FixEvent) {
             eprintln!("[fix:result] {winner}: {title}");
             println!("{diff}");
         }
+        // Every tool call the branches make; too noisy by default, but what you need to debug a /fix run from logs.
+        FixEvent::Activity(a) if verbose() => eprintln!("[fix:activity] {a}"),
         FixEvent::Activity(_) => {}
     }
+}
+
+/// EMBER_VERBOSE=1 logs more of what print mode does.
+fn verbose() -> bool {
+    matches!(std::env::var("EMBER_VERBOSE").as_deref(), Ok("1" | "true" | "on"))
 }
 
 #[tokio::main]
@@ -99,6 +106,7 @@ async fn main() -> Result<()> {
 /// `/fix <issue>` runs the /fix pipeline instead, applying the winning patch only with --yes.
 async fn print_mode(config: Config, cwd: std::path::PathBuf, prompt: String, yes: bool, think: crate::llm::Think) -> Result<()> {
     let client = config.client();
+    let pricing = config.clone();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let turn = if let Some(issue) = prompt.strip_prefix("/fix ").map(str::trim).filter(|i| !i.is_empty()) {
         let (issue, cwd) = (issue.to_string(), cwd.clone());
@@ -113,6 +121,8 @@ async fn print_mode(config: Config, cwd: std::path::PathBuf, prompt: String, yes
     };
     let mut out = std::io::stdout();
     let (mut steps, mut tools, mut prompt_tokens, mut cached, mut completion) = (0, 0, 0, 0, 0);
+    // Whether part of a reply is on stdout, so a retry can mark it as discarded.
+    let mut partial = false;
     // Per model, for pricing runs that mix tiers (/fix uses Nano, Super and Ultra): calls, input, cached, output.
     let mut by_model: std::collections::BTreeMap<String, [u64; 4]> = Default::default();
     while let Some(event) = rx.recv().await {
@@ -120,8 +130,20 @@ async fn print_mode(config: Config, cwd: std::path::PathBuf, prompt: String, yes
             AgentEvent::Text(t) => {
                 print!("{t}");
                 out.flush()?;
+                partial = true;
             }
-            AgentEvent::Reply { content, .. } if !content.is_empty() => println!(),
+            AgentEvent::Reply { content, .. } => {
+                if !content.is_empty() {
+                    println!();
+                }
+                partial = false;
+            }
+            // The reply streams again from the start, so close off the broken one rather than run them together.
+            AgentEvent::Retrying(why) if partial => {
+                println!("\n[reply interrupted; retrying from the start]");
+                eprintln!("[retry] {why}");
+                partial = false;
+            }
             AgentEvent::Retrying(why) => eprintln!("[retry] {why}"),
             AgentEvent::ToolDone { summary, ok, .. } => {
                 tools += 1;
@@ -149,14 +171,24 @@ async fn print_mode(config: Config, cwd: std::path::PathBuf, prompt: String, yes
             }
             AgentEvent::Fix(ev) => print_fix_event(ev),
             AgentEvent::Error(e) => eprintln!("error: {e}"),
+            AgentEvent::Notice(n) => eprintln!("[note] {n}"),
             _ => {}
         }
     }
     turn.await??;
     let pct = (cached * 100).checked_div(prompt_tokens).unwrap_or(0);
-    eprintln!("[usage] {steps} model calls, {tools} tool calls, {prompt_tokens} input tokens ({pct}% cached), {completion} output tokens");
-    for (model, [calls, input, cached, output]) in by_model {
-        eprintln!("[usage:model] {model}: {calls} calls, {input} input, {cached} cached, {output} output");
+    // Priced at Token Factory list prices; `≥` when some model has no known price.
+    let costs: Vec<Option<f64>> = by_model.iter().map(|(m, [_, i, k, o])| pricing.cost(m, *i, *o, *k)).collect();
+    let total = if costs.iter().all(Option::is_none) {
+        String::new()
+    } else {
+        let unknown = if costs.iter().any(Option::is_none) { "≥" } else { "" };
+        format!(", {unknown}{}", crate::config::format_cost(costs.iter().flatten().sum()))
+    };
+    eprintln!("[usage] {steps} model calls, {tools} tool calls, {prompt_tokens} input tokens ({pct}% cached), {completion} output tokens{total}");
+    for ((model, [calls, input, cached, output]), cost) in by_model.into_iter().zip(costs) {
+        let cost = cost.map(|c| format!(", {}", crate::config::format_cost(c))).unwrap_or_default();
+        eprintln!("[usage:model] {model}: {calls} calls, {input} input, {cached} cached, {output} output{cost}");
     }
     Ok(())
 }

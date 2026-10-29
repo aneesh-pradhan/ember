@@ -233,3 +233,23 @@ async fn saved_permissions_carry_over_to_new_sessions() {
     let mut third = agent(&model, &dir, Mode::Ask).with_permissions_file(file);
     assert_eq!(approvals(&turn(&mut third, "once more", Decision::Yes).await), ["Run `ls -l`"], "forgotten");
 }
+
+/// New files are listed by absolute path at the end of the turn; edits to existing files aren't.
+#[tokio::test]
+async fn names_new_files_by_full_path() {
+    let dir = project(&[("old.txt", "one\n")]);
+    let model = MockModel::start(vec![
+        Reply::Tools(vec![call("edit_file", json!({"path": "old.txt", "old_string": "one", "new_string": "two"}))]),
+        Reply::Tools(vec![call("write_file", json!({"path": "site/index.html", "content": "<h1>hi</h1>\n"}))]),
+        Reply::Text("Saved as index.html."),
+    ])
+    .await;
+    let mut a = agent(&model, &dir, Mode::Auto);
+    let events = turn(&mut a, "make a page", Decision::No).await;
+
+    let notes: Vec<_> = events.iter().filter_map(|e| match e {
+        AgentEvent::Notice(n) => Some(n.clone()),
+        _ => None,
+    }).collect();
+    assert_eq!(notes, [format!("New files: {}", dir.join("site/index.html").display())]);
+}

@@ -1203,18 +1203,37 @@ impl App {
         self.print(lines);
     }
 
+    /// The session's cost so far at Token Factory list prices, with a `≥` when some calls went to a model whose
+    /// price isn't known; None when no call has a known price (another server, or no calls yet).
+    fn session_cost(&self) -> Option<String> {
+        let costs: Vec<Option<f64>> =
+            self.usage.iter().map(|(model, (p, c, cached))| self.config.cost(model, *p, *c, *cached)).collect();
+        let known: f64 = costs.iter().flatten().sum();
+        if costs.iter().all(Option::is_none) {
+            return None;
+        }
+        let at_least = if costs.iter().any(Option::is_none) { "≥" } else { "" };
+        Some(format!("{at_least}{}", crate::config::format_cost(known)))
+    }
+
     fn print_usage(&mut self) {
         if self.usage.is_empty() {
             self.print_notice("No model calls yet");
             return;
         }
-        let mut rows = vec![Line::styled(format!("  {:<42} {:>9} {:>8} {:>9}", "model", "input", "cached", "output"), theme::bold())];
+        let header = format!("  {:<42} {:>9} {:>8} {:>9} {:>8}", "model", "input", "cached", "output", "cost");
+        let mut rows = vec![Line::styled(header, theme::bold())];
         for (model, (p, c, cached)) in &self.usage {
             let pct = if *p > 0 { format!("{}%", cached * 100 / p) } else { "-".into() };
-            rows.push(Line::styled(format!("  {model:<42} {p:>9} {pct:>8} {c:>9}"), theme::dim()));
+            let cost = self.config.cost(model, *p, *c, *cached).map_or("-".into(), crate::config::format_cost);
+            rows.push(Line::styled(format!("  {model:<42} {p:>9} {pct:>8} {c:>9} {cost:>8}"), theme::dim()));
+        }
+        if let Some(total) = self.session_cost() {
+            rows.push(Line::styled(format!("  {:<42} {:>9} {:>8} {:>9} {total:>8}", "total", "", "", ""), theme::bold()));
         }
         rows.push(Line::styled(
-            "  Cached input is served from Token Factory's prompt cache at a lower price.",
+            "  Cached input is served from Token Factory's prompt cache at a lower price. Costs use Token Factory's list \
+             prices; models without a known price show -.",
             theme::dim(),
         ));
         self.print(rows);
@@ -1400,6 +1419,9 @@ impl App {
         let tokens: u64 = self.usage.values().map(|(p, c, _)| p + c).sum();
         if tokens > 0 {
             right.push(Span::styled(format!("{:.1}k tok  ", tokens as f64 / 1000.0), theme::dim()));
+        }
+        if let Some(cost) = self.session_cost() {
+            right.push(Span::styled(format!("{}  ", cost), theme::dim()));
         }
         if let Ok(agent) = self.agent.try_lock() {
             let think = *agent.think.lock().unwrap();
