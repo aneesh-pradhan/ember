@@ -170,6 +170,7 @@ async fn print_mode(config: Config, cwd: std::path::PathBuf, prompt: String, yes
             }
             AgentEvent::Fix(ev) => print_fix_event(ev),
             AgentEvent::Error(e) => eprintln!("error: {e}"),
+            AgentEvent::Notice(n) => eprintln!("[note] {n}"),
             _ => {}
         }
     }
