@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -196,11 +196,19 @@ pub struct Client {
     think_budget: Option<u32>,
 }
 
+/// How long a request may go without receiving any data before ember gives up on it.
+const STALL_TIMEOUT: Duration = Duration::from_secs(180);
+
 impl Client {
     pub fn new(base_url: &str, api_key: Option<String>) -> Self {
         Client {
             http: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(20))
+                // A connection that dies silently (the laptop slept mid-reply, the network dropped) otherwise
+                // leaves a streamed reply waiting forever. The read timeout resets on every chunk, so long
+                // replies are fine; it only fires after this long with no data at all.
+                .read_timeout(STALL_TIMEOUT)
+                .tcp_keepalive(Duration::from_secs(30))
                 .build()
                 .expect("http client"),
             base_url: format!("{}/", base_url.trim_end_matches('/')),
@@ -331,7 +339,10 @@ impl Client {
         };
 
         'outer: while let Some(chunk) = stream.next().await {
-            pending.extend_from_slice(&chunk?);
+            let chunk = chunk.with_context(|| {
+                format!("the model's reply stopped arriving (no data for {}s, or the connection dropped)", STALL_TIMEOUT.as_secs())
+            })?;
+            pending.extend_from_slice(&chunk);
             while let Some(pos) = pending.iter().position(|&b| b == b'\n') {
                 let line: Vec<u8> = pending.drain(..=pos).collect();
                 let line = String::from_utf8_lossy(&line);
