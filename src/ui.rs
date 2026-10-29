@@ -1066,6 +1066,11 @@ impl App {
         let id = Tier::parse(arg).map_or(arg.to_string(), |t| self.config.model(t).to_string());
         *self.model.lock().unwrap() = id.clone();
         self.print_notice(format!("Now using {id}"));
+        // Token Factory caches Ultra in 4,352-token blocks and never counts the last one, so short agent steps
+        // get no cache hits (0% on ember's benchmark, about 9x Super's cost per task).
+        if id.to_ascii_lowercase().contains("ultra") && self.config.base_url.contains("nebius.com") {
+            self.print_notice("Ultra gets few prompt-cache hits on Token Factory, so multi-step tasks cost about 9x Super");
+        }
     }
 
     fn print_help(&mut self) {

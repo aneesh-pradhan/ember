@@ -48,7 +48,10 @@ What it changed:
 - **Lightning is a strong cheap tier.** It passed every run, at about the cost of Super with kept reasoning, though it
   made more calls and used more input. It's being evaluated as the fast tier and `/fix` judge.
 - **Ultra got no cache hits** (0% cached input on every run), which makes it about 9× the cost of Super per task.
-  It stays reserved for the two `/fix` decisions.
+  The cause is how Token Factory caches Ultra, not ember: it caches in 4,352-token blocks and never counts the last
+  whole block (`cached = 4352 × (floor(prompt / 4352) − 1)`, matching every size from 7.8k to 39.7k tokens), so
+  prompts under about 8.7k tokens never hit. Super caches almost the whole prefix from about 3k tokens. Ultra stays
+  reserved for the two single-call `/fix` decisions, and `/model ultra` warns about the cost.
 - **Almost every failure is `half_up`.** Its hidden test includes the float case `1.005 → 1.01`, which the task
   description doesn't mention. Only `Decimal(str(x))` passes it; `Decimal(x).quantize(...)` still rounds down.
 
