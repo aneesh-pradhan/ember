@@ -52,6 +52,7 @@ const COMMANDS: &[(&str, &str, bool)] = &[
     ("diff", "show uncommitted changes (git diff)", false),
     ("todos", "show the current task list", false),
     ("think", "set Nemotron's reasoning for the agent: on, low or off", true),
+    ("theme", "switch ember's look: kawaii (pastel, sparkles, kaomoji) or classic", true),
     ("mcp", "show connected MCP servers and their tools", false),
     ("usage", "token usage per model this session", false),
     ("help", "show commands and keys", false),
@@ -77,6 +78,8 @@ pub struct App {
     live_text: String,
     live_reasoning: String,
     live_tool: Option<String>,
+    /// The mascot's reaction to the last tool result (happy after passing tests, sad after a failure), and when.
+    reaction: Option<(theme::Mood, Instant)>,
     approval: Option<ApprovalRequest>,
     fix: Option<FixView>,
     todos: Vec<Todo>,
@@ -154,6 +157,7 @@ pub async fn run(
         live_text: String::new(),
         live_reasoning: String::new(),
         live_tool: None,
+        reaction: None,
         approval: None,
         fix: None,
         todos: vec![],
@@ -262,7 +266,7 @@ impl App {
     fn print_user(&mut self, text: &str) {
         self.print_line(Line::default());
         for (i, line) in text.lines().enumerate() {
-            let lead = if i == 0 { Span::styled("› ", theme::accent()) } else { Span::raw("  ") };
+            let lead = if i == 0 { Span::styled(theme::glyphs().prompt, theme::accent()) } else { Span::raw("  ") };
             self.print_line(Line::from(vec![lead, Span::styled(line.to_string(), theme::bold())]));
         }
     }
@@ -278,7 +282,7 @@ impl App {
     fn print_reply(&mut self, content: &str) {
         self.print_line(Line::default());
         for (i, line) in markdown::render(content).into_iter().enumerate() {
-            let lead = if i == 0 { Span::styled("● ", theme::accent()) } else { Span::raw("  ") };
+            let lead = if i == 0 { Span::styled(theme::glyphs().reply, theme::accent()) } else { Span::raw("  ") };
             let mut spans = vec![lead];
             spans.extend(line.spans);
             self.print_line(Line::from(spans));
@@ -291,7 +295,8 @@ impl App {
             return;
         }
         let lines = todo_lines(&self.todos);
-        self.print_line(Line::from(vec![Span::styled("  ● ", theme::accent()), Span::styled("Task list", theme::bold())]));
+        let lead = format!("  {}", theme::glyphs().reply);
+        self.print_line(Line::from(vec![Span::styled(lead, theme::accent()), Span::styled("Task list", theme::bold())]));
         self.print(lines);
     }
 
@@ -303,7 +308,7 @@ impl App {
             AgentEvent::Reasoning(r) => self.live_reasoning.push_str(&r),
             AgentEvent::Reply { content, thought_secs } => {
                 if let Some(secs) = thought_secs.filter(|s| *s >= 2.0) {
-                    self.print_line(Line::styled(format!("  ∴ reasoned for {secs:.1}s"), theme::dim()));
+                    self.print_line(Line::styled(format!("  {} reasoned for {secs:.1}s", theme::glyphs().reasoning), theme::dim()));
                 }
                 if !content.trim().is_empty() {
                     self.print_reply(&content);
@@ -314,8 +319,13 @@ impl App {
             AgentEvent::ToolStart { summary } => self.live_tool = Some(summary),
             AgentEvent::ToolDone { name, summary, output, ok } => {
                 self.live_tool = None;
-                let dot = if ok { theme::ok() } else { theme::err() };
-                self.print_line(Line::from(vec![Span::styled("  ● ", dot), Span::styled(summary, theme::bold())]));
+                if !ok {
+                    self.reaction = Some((theme::Mood::Sad, Instant::now()));
+                } else if name == "bash" && theme::is_test_run(&summary) {
+                    self.reaction = Some((theme::Mood::Happy, Instant::now()));
+                }
+                let (mark, dot) = if ok { (theme::glyphs().tool_ok, theme::ok()) } else { (theme::glyphs().tool_err, theme::err()) };
+                self.print_line(Line::from(vec![Span::styled(format!("  {mark} "), dot), Span::styled(summary, theme::bold())]));
                 if name == "bash" {
                     let lines: Vec<&str> = output.lines().collect();
                     let start = lines.len().saturating_sub(10);
@@ -371,7 +381,9 @@ impl App {
             AgentEvent::Notice(text) => self.print_line(Line::styled(format!("  {text}"), theme::info())),
             AgentEvent::Fix(ev) => self.on_fix(ev),
             AgentEvent::Error(err) => {
-                self.print_line(Line::styled(format!("  ✗ {err}"), theme::err()));
+                self.reaction = Some((theme::Mood::Sad, Instant::now()));
+                let face = theme::face(theme::Mood::Sad).map(|f| format!("  {f}")).unwrap_or_default();
+                self.print_line(Line::styled(format!("  {} {err}{face}", theme::glyphs().failed), theme::err()));
             }
             AgentEvent::Done => {
                 self.git = crate::git::status(&self.cwd);
@@ -399,8 +411,8 @@ impl App {
                 view.activity.clear();
                 let (mark, style) = match status {
                     Status::Running => return,
-                    Status::Done => ("✓", theme::ok()),
-                    Status::Failed => ("✗", theme::err()),
+                    Status::Done => (theme::glyphs().done, theme::ok()),
+                    Status::Failed => (theme::glyphs().failed, theme::err()),
                 };
                 out.push(Line::from(vec![
                     Span::styled(format!("  {mark} "), style),
@@ -416,7 +428,7 @@ impl App {
                     return;
                 }
                 out.push(Line::from(vec![
-                    Span::styled("    ✗ FAILS ", theme::err().add_modifier(Modifier::BOLD)),
+                    Span::styled(format!("    {} FAILS ", theme::glyphs().failed), theme::err().add_modifier(Modifier::BOLD)),
                     Span::styled(format!("{path} on the current code: {reason}"), theme::dim()),
                 ]));
                 for line in code.lines().take(30) {
@@ -792,6 +804,7 @@ impl App {
                     }
                 }
             }
+            "theme" => self.set_theme(arg),
             "usage" | "cost" => self.print_usage(),
             "todos" => self.print_todos(),
             "diff" => self.print_git_diff(),
@@ -1073,6 +1086,29 @@ impl App {
         }
     }
 
+    /// `/theme` shows the current look; `/theme kawaii|classic` switches and remembers it.
+    fn set_theme(&mut self, arg: &str) {
+        let Some(choice) = theme::Theme::parse(arg) else {
+            self.print_notice(format!("Theme is {}. Use /theme kawaii or /theme classic.", theme::current().label()));
+            return;
+        };
+        theme::set(choice);
+        let saved = theme::save(choice).map_or_else(|e| format!(" (couldn't save it: {e})"), |_| String::new());
+        let flourish = theme::face(theme::Mood::Happy).map(|f| format!(" {f}")).unwrap_or_default();
+        self.print_notice(format!("Theme: {}{flourish}{saved}", choice.label()));
+    }
+
+    /// The mascot's mood for the working indicator: a recent reaction wins for a few seconds, then what it's doing.
+    fn mood(&self, elapsed: u64) -> theme::Mood {
+        match self.reaction {
+            Some((mood, at)) if at.elapsed() < Duration::from_secs(4) => mood,
+            _ if self.live_tool.is_some() => theme::Mood::Busy,
+            _ if !self.live_reasoning.is_empty() && self.live_text.is_empty() => theme::Mood::Thinking,
+            _ if elapsed >= 60 => theme::Mood::Sweaty,
+            _ => theme::Mood::Working,
+        }
+    }
+
     fn print_help(&mut self) {
         let mut lines = vec![Line::default(), Line::styled("  Commands", theme::bold())];
         for (name, desc, arg) in COMMANDS {
@@ -1237,7 +1273,7 @@ impl App {
                 Mode::Plan => "Describe what you want; ember will investigate and propose a plan",
                 _ => "Ask ember to build, fix or explain something",
             };
-            vec![Line::from(vec![Span::styled("› ", theme::accent()), Span::styled(hint, theme::dim())])]
+            vec![Line::from(vec![Span::styled(theme::glyphs().prompt, theme::accent()), Span::styled(hint, theme::dim())])]
         } else {
             let shell = self.input.text().starts_with('!');
             self.input
@@ -1248,7 +1284,7 @@ impl App {
                 .map(|(i, l)| {
                     let lead = match (i, shell) {
                         (0, true) => Span::styled("! ", theme::code()),
-                        (0, false) => Span::styled("› ", theme::accent()),
+                        (0, false) => Span::styled(theme::glyphs().prompt, theme::accent()),
                         _ => Span::raw("  "),
                     };
                     Line::from(vec![lead, Span::raw(l.to_string())])
@@ -1262,11 +1298,14 @@ impl App {
 
     fn render_approval(&self, f: &mut Frame, area: Rect) {
         let Some(req) = &self.approval else { return };
-        let block = Block::bordered()
-            .border_type(BorderType::Rounded)
-            .border_style(theme::accent())
-            .title(Span::styled(" Permission ", theme::accent().add_modifier(Modifier::BOLD)))
-            .padding(Padding::horizontal(1));
+        let mut block = Block::bordered().border_type(BorderType::Rounded).border_style(theme::accent()).padding(Padding::horizontal(1));
+        block = match theme::current() {
+            // A little retro OS window: title bar text on the left, window buttons on the right.
+            theme::Theme::Kawaii => block
+                .title(Span::styled(" ♡ permission? ♡ ", theme::accent().add_modifier(Modifier::BOLD)))
+                .title_top(Line::styled(" _ □ ✕ ", theme::dim()).right_aligned()),
+            theme::Theme::Classic => block.title(Span::styled(" Permission ", theme::accent().add_modifier(Modifier::BOLD))),
+        };
         let inner = block.inner(area);
         block.render(area, f.buffer_mut());
         let options = approval_options(req);
@@ -1278,7 +1317,7 @@ impl App {
         for (i, (_, label)) in options.iter().enumerate() {
             let selected = i == sel;
             lines.push(Line::from(vec![
-                Span::styled(if selected { "› " } else { "  " }, theme::accent()),
+                Span::styled(if selected { theme::glyphs().select } else { "  " }, theme::accent()),
                 Span::styled(
                     format!("{}. {label}", i + 1),
                     if selected { theme::accent().add_modifier(Modifier::BOLD) } else { ratatui::style::Style::default() },
@@ -1342,7 +1381,7 @@ impl App {
             .take(height)
             .map(|(i, (label, detail))| {
                 let selected = i == sel;
-                let lead = if selected { Span::styled("› ", theme::accent()) } else { Span::raw("  ") };
+                let lead = if selected { Span::styled(theme::glyphs().select, theme::accent()) } else { Span::raw("  ") };
                 let style = if selected { theme::accent().add_modifier(Modifier::BOLD) } else { ratatui::style::Style::default() };
                 let mut spans = vec![lead, Span::styled(format!("{label:<12}"), style)];
                 if !detail.is_empty() {
@@ -1355,7 +1394,7 @@ impl App {
 
     fn live_lines(&self, width: u16) -> Vec<Line<'static>> {
         let Some(_) = &self.task else { return vec![] };
-        let spinner = theme::SPINNER[self.frame % theme::SPINNER.len()];
+        let spinner = theme::spinner(self.frame);
         let elapsed = self.task_started.elapsed().as_secs();
         let mut lines = vec![];
 
@@ -1365,8 +1404,8 @@ impl App {
                 .flat_map(|name| {
                     let status = view.stages.iter().find(|(n, _)| n == name).map(|(_, s)| *s);
                     let (mark, style) = match status {
-                        Some(Status::Done) => ("✓ ".to_string(), theme::ok()),
-                        Some(Status::Failed) => ("✗ ".to_string(), theme::err()),
+                        Some(Status::Done) => (format!("{} ", theme::glyphs().done), theme::ok()),
+                        Some(Status::Failed) => (format!("{} ", theme::glyphs().failed), theme::err()),
                         Some(Status::Running) => (format!("{spinner} "), theme::accent()),
                         None => ("· ".to_string(), theme::dim()),
                     };
@@ -1396,12 +1435,12 @@ impl App {
             lines.extend(markdown::wrap(&markdown::render(&self.live_text), width));
         } else if !self.live_reasoning.is_empty() {
             let last = self.live_reasoning.lines().last().unwrap_or("").to_string();
-            lines.push(Line::styled(format!("  ∴ {}", tools::one_line(&last, width as usize - 6)), theme::dim()));
+            lines.push(Line::styled(format!("  {} {}", theme::glyphs().reasoning, tools::one_line(&last, width as usize - 6)), theme::dim()));
         }
         if let Some(current) = self.todos.iter().find(|t| t.status == "in_progress") {
             let done = self.todos.iter().filter(|t| t.status == "completed").count();
             lines.push(Line::from(vec![
-                Span::styled("  ▸ ", theme::accent()),
+                Span::styled(format!("  {} ", theme::glyphs().todo_active), theme::accent()),
                 Span::raw(tools::one_line(&current.content, width as usize - 16)),
                 Span::styled(format!("  {done}/{}", self.todos.len()), theme::dim()),
             ]));
@@ -1409,7 +1448,7 @@ impl App {
         let doing = self.live_tool.clone().unwrap_or_else(|| {
             if self.live_reasoning.is_empty() || !self.live_text.is_empty() { "Working".into() } else { "Reasoning".into() }
         });
-        let mut status = logo::mini(self.frame);
+        let mut status = logo::mini(self.frame, self.mood(elapsed));
         status.extend([
             Span::styled(tools::one_line(&doing, width as usize / 2), theme::code()),
             Span::styled(format!("  {elapsed}s · esc to interrupt"), theme::dim()),
@@ -1438,9 +1477,9 @@ fn todo_lines(todos: &[Todo]) -> Vec<Line<'static>> {
         .iter()
         .map(|t| {
             let (mark, style) = match t.status.as_str() {
-                "completed" => ("✓", theme::ok()),
-                "in_progress" => ("▸", theme::accent().add_modifier(Modifier::BOLD)),
-                _ => ("○", theme::dim()),
+                "completed" => (theme::glyphs().todo_done, theme::ok()),
+                "in_progress" => (theme::glyphs().todo_active, theme::accent().add_modifier(Modifier::BOLD)),
+                _ => (theme::glyphs().todo, theme::dim()),
             };
             let text_style = match t.status.as_str() {
                 "completed" => theme::dim().add_modifier(Modifier::CROSSED_OUT),

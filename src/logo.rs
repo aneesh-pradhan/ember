@@ -76,23 +76,46 @@ fn sprite_rows() -> Vec<Vec<Span<'static>>> {
         .collect()
 }
 
-/// The startup banner: the mascot with session info beside it.
+/// The startup banner: the mascot with session info beside it (and sparkles, in the kawaii theme).
 pub fn banner(model: &str, cwd: &str) -> Vec<Line<'static>> {
-    let info: [Vec<Span<'static>>; 10] = [
-        vec![],
-        vec![],
-        vec![],
-        vec![
-            Span::styled("ember", theme::bold().add_modifier(Modifier::BOLD)),
-            Span::styled(format!(" v{}", env!("CARGO_PKG_VERSION")), theme::dim()),
+    let version = format!(" v{}", env!("CARGO_PKG_VERSION"));
+    let model = Span::styled(model.to_string(), theme::tier(crate::config::Tier::Coder));
+    let cwd = Span::styled(cwd.to_string(), theme::dim());
+    let info: [Vec<Span<'static>>; 10] = match theme::current() {
+        theme::Theme::Kawaii => {
+            let pink = theme::accent();
+            let lilac = theme::tier(crate::config::Tier::Coder);
+            [
+                vec![],
+                vec![Span::styled("˚ ✧ ⋆ ｡", lilac)],
+                vec![],
+                vec![
+                    Span::styled("✧･ﾟ: ", pink),
+                    Span::styled("ember", pink.add_modifier(Modifier::BOLD)),
+                    Span::styled(version, theme::dim()),
+                    Span::styled(" :･ﾟ✧", pink),
+                ],
+                vec![Span::styled("your pocket Nemotron rig ", theme::dim()), Span::styled("♡ (｡•ᴗ•｡)", pink)],
+                vec![model],
+                vec![cwd],
+                vec![Span::styled("/help for commands ♡ /fix <bug> proves it, then fixes it", theme::dim())],
+                vec![],
+                vec![Span::styled("｡ ⋆ ✦ ˚", lilac)],
+            ]
+        }
+        theme::Theme::Classic => [
+            vec![],
+            vec![],
+            vec![],
+            vec![Span::styled("ember", theme::bold().add_modifier(Modifier::BOLD)), Span::styled(version, theme::dim())],
+            vec![Span::styled("your pocket Nemotron rig", theme::dim())],
+            vec![model],
+            vec![cwd],
+            vec![Span::styled("/help for commands · /fix <bug> proves it, then fixes it", theme::dim())],
+            vec![],
+            vec![],
         ],
-        vec![Span::styled("your pocket Nemotron rig", theme::dim())],
-        vec![Span::styled(model.to_string(), theme::tier(crate::config::Tier::Coder))],
-        vec![Span::styled(cwd.to_string(), theme::dim())],
-        vec![Span::styled("/help for commands · /fix <bug> proves it, then fixes it", theme::dim())],
-        vec![],
-        vec![],
-    ];
+    };
     let mut lines = vec![Line::default()];
     for (row, text) in sprite_rows().into_iter().zip(info) {
         let mut spans = vec![Span::raw("  ")];
@@ -114,8 +137,9 @@ fn fg(c: Color) -> Style {
     Style::default().fg(c)
 }
 
-/// A one-line board for the working indicator: the fan spins, the LED blinks, and bits stream out.
-pub fn mini(frame: usize) -> Vec<Span<'static>> {
+/// A one-line board for the working indicator: the fan spins, the LED blinks, and bits stream out. In the kawaii
+/// theme its face follows `mood`.
+pub fn mini(frame: usize, mood: theme::Mood) -> Vec<Span<'static>> {
     let fan = FAN_FRAMES[frame % FAN_FRAMES.len()];
     let led = if (frame / 3) % 2 == 0 { theme::accent() } else { fg(PCB_DARK) };
     let bits: String = (0..4).map(|i| STREAM[(frame + 5 * 6 - i * 2) % STREAM.len()]).collect();
@@ -130,6 +154,9 @@ pub fn mini(frame: usize) -> Vec<Span<'static>> {
         Span::styled(bits, fg(BOARD_GREEN)),
         Span::raw(" "),
     ]
+    .into_iter()
+    .chain(theme::face(mood).map(|face| Span::styled(format!("{face} "), theme::accent())))
+    .collect()
 }
 
 #[cfg(test)]

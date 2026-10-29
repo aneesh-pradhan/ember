@@ -74,6 +74,7 @@ fn print_fix_event(ev: crate::fix::FixEvent) {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let mut config = Config::load();
+    theme::init();
     if let Some(m) = &cli.model {
         config.coder = Tier::parse(m).map_or(m.clone(), |t| config.model(t).to_string());
     }
