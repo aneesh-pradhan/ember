@@ -1,0 +1,1 @@
+Rename `Invoice.add` to `Invoice.add_item` everywhere in the project (code, tests and docs). Keep `add` working as a deprecated alias: it should emit a `DeprecationWarning` and then behave exactly like `add_item`.

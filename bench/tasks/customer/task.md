@@ -1,0 +1,1 @@
+Add customers. Create a `Customer` dataclass in a new module `src/tinyledger/customer.py` with a `name` and an optional `tax_exempt` flag (default False), and export it from the `tinyledger` package. `Invoice` gets an optional `customer` field (default None). When the invoice's customer is tax exempt, its tax is 0 and the total has no tax; otherwise nothing changes. Add tests.
