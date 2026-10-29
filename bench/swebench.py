@@ -71,9 +71,10 @@ def load_api_key() -> None:
     sys.exit("NEBIUS_API_KEY is not set (and not in ~/.config/ember/env)")
 
 
-def run_agent(rt: str, ember: Path, inst: dict, config: str, prompt: str, timeout: int, logs: Path) -> dict:
+def run_agent(rt: str, ember: Path, inst: dict, config: str, prompt: str, timeout: int, logs: Path, run_id: str) -> dict:
     """Run ember on one instance in its SWE-bench image and return its patch plus usage."""
-    name = f"ember-swe-{inst['instance_id'].lower()}-{config}"
+    # The run id keeps concurrent runs (an A/B's two arms) from removing each other's containers.
+    name = f"ember-swe-{run_id}-{inst['instance_id']}-{config}".lower()
     env = {**CONFIGS[config], "EMBER_NO_WEB": "1", "EMBER_MOUSE": "off"}
     env_args = [arg for k, v in env.items() for arg in ("-e", f"{k}={v}")]
     subprocess.run([rt, "rm", "-f", name], capture_output=True)
@@ -97,6 +98,9 @@ def run_agent(rt: str, ember: Path, inst: dict, config: str, prompt: str, timeou
             stdout, stderr, timed_out = _text(e.stdout), _text(e.stderr), True
         seconds = time.time() - started
         (logs / f"{inst['instance_id']}.{config}.log").write_text(f"{stderr}\n--- stdout ---\n{stdout}")
+        if not timed_out and "[usage]" not in stderr:
+            # ember never finished (container gone, crash, API outage): an error to retry, not a failed attempt.
+            raise RuntimeError(f"ember didn't finish: {stderr.strip()[-300:]}")
         # Stage everything (new files included) except ember's own state and binary files (build output such as
         # Sphinx doctrees, which no reference patch contains and the grader can't apply), then diff against HEAD.
         diff = subprocess.run(
@@ -133,7 +137,7 @@ def grade(inst: dict, config: str, patch: str, run_id: str, out: Path) -> bool:
 def run_one(rt: str, ember: Path, inst: dict, config: str, prompt: str, timeout: int, run_id: str, out: Path) -> dict:
     row = {"instance_id": inst["instance_id"], "config": config, "resolved": False, "error": ""}
     try:
-        r = run_agent(rt, ember, inst, config, prompt, timeout, out / "agent")
+        r = run_agent(rt, ember, inst, config, prompt, timeout, out / "agent", run_id)
         patch = r.pop("patch")
         row |= r | {"patch_lines": patch.count("\n")}
         if patch.strip():
