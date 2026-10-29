@@ -7,6 +7,7 @@ mod input;
 mod llm;
 mod logo;
 mod markdown;
+mod math;
 mod mcp;
 mod permissions;
 #[cfg(test)]
