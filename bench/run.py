@@ -50,16 +50,26 @@ CONFIGS = {
     "lightning": {"EMBER_MODEL_CODER": LIGHTNING},
 }
 
+MODEL_USAGE_RE = re.compile(r"\[usage:model\] (\S+): (\d+) calls, (\d+) input, (\d+) cached, (\d+) output")
 USAGE_RE = re.compile(r"\[usage\] (\d+) model calls, (\d+) tool calls, (\d+) input tokens \((\d+)% cached\), (\d+) output tokens")
 
 
 def usage_and_cost(stderr: str, model: str) -> dict:
-    """Parse ember's `[usage]` line from print mode and price it with Token Factory rates."""
+    """Parse ember's `[usage]` lines from print mode and price them with Token Factory rates.
+
+    Newer builds also print one `[usage:model]` line per model, which prices runs that mix tiers (like /fix) and
+    uses exact cached counts; older builds only have the total, priced as `model`.
+    """
     m = USAGE_RE.search(stderr)
     calls, tools, inp, pct, out = (int(x) for x in m.groups()) if m else (0, 0, 0, 0, 0)
-    cached = inp * pct // 100
-    price_in, price_cached, price_out = PRICES.get(model, PRICES[SUPER])
-    cost = ((inp - cached) * price_in + cached * price_cached + out * price_out) / 1e6
+    per_model = [(name, *(int(x) for x in rest)) for name, *rest in MODEL_USAGE_RE.findall(stderr)]
+    if not per_model:
+        per_model = [(model, calls, inp, inp * pct // 100, out)]
+    cost, cached = 0.0, 0
+    for name, _, m_in, m_cached, m_out in per_model:
+        price_in, price_cached, price_out = PRICES.get(name, PRICES[SUPER])
+        cost += ((m_in - m_cached) * price_in + m_cached * price_cached + m_out * price_out) / 1e6
+        cached += m_cached
     return {"model_calls": calls, "tool_calls": tools, "input": inp, "cached": cached, "output": out, "cost": round(cost, 5)}
 
 
