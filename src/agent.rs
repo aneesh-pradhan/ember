@@ -350,7 +350,7 @@ impl Agent {
             let _ = tx.send(AgentEvent::Context { used: self.last_prompt_tokens, window: context_window(&model) });
             let _ = tx.send(AgentEvent::Reply {
                 content: resp.content.clone(),
-                thought_secs: (!resp.reasoning.is_empty()).then(|| resp.elapsed.as_secs_f32()),
+                thought_secs: (!resp.reasoning.is_empty()).then_some(resp.elapsed.as_secs_f32()),
             });
             let mut reply = Message::assistant(resp.content, resp.tool_calls.clone());
             if self.keep_reasoning && !resp.reasoning.is_empty() {

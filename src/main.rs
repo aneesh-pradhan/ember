@@ -109,7 +109,7 @@ async fn print_mode(config: Config, cwd: std::path::PathBuf, prompt: String, yes
         }
     }
     turn.await??;
-    let pct = if prompt_tokens > 0 { cached * 100 / prompt_tokens } else { 0 };
+    let pct = (cached * 100).checked_div(prompt_tokens).unwrap_or(0);
     eprintln!("[usage] {steps} model calls, {tools} tool calls, {prompt_tokens} input tokens ({pct}% cached), {completion} output tokens");
     Ok(())
 }
