@@ -238,6 +238,8 @@ pub fn spinner(frame: usize) -> &'static str {
 /// How the mascot feels, shown as a kaomoji beside it in the kawaii theme.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mood {
+    /// Waiting for the user.
+    Idle,
     Working,
     Thinking,
     Busy,
@@ -254,6 +256,7 @@ pub fn face(mood: Mood) -> Option<&'static str> {
         return None;
     }
     Some(match mood {
+        Mood::Idle => "(ᵔᴗᵔ)",
         Mood::Working => "(｡•ᴗ•｡)",
         Mood::Thinking => "(˘ω˘)",
         Mood::Busy => "ᕦ(•ᴗ•)ᕤ",
