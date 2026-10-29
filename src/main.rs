@@ -51,6 +51,25 @@ struct Cli {
     resume: bool,
 }
 
+/// One stderr line per /fix event worth logging in print mode.
+fn print_fix_event(ev: crate::fix::FixEvent) {
+    use crate::fix::FixEvent;
+    match ev {
+        FixEvent::Stage { name, status, detail } => eprintln!("[fix:{name}] {status:?} {detail}"),
+        FixEvent::Note(n) => eprintln!("[fix] {n}"),
+        FixEvent::Repro { attempt, path, confirmed, reason, .. } => {
+            eprintln!("[fix:repro] attempt {attempt}: {path} {} {reason}", if confirmed { "confirmed" } else { "rejected" })
+        }
+        FixEvent::Strategies(s) => s.iter().for_each(|s| eprintln!("[fix:plan] {}: {}", s.id, s.title)),
+        FixEvent::Branch { id, status, note } => eprintln!("[fix:branch {id}] {status} {note}"),
+        FixEvent::Result { winner, title, diff, .. } => {
+            eprintln!("[fix:result] {winner}: {title}");
+            println!("{diff}");
+        }
+        FixEvent::Activity(_) => {}
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -72,15 +91,21 @@ async fn main() -> Result<()> {
 }
 
 /// Non-interactive mode: stream the answer to stdout. Mutating tools are denied unless --yes.
+/// `/fix <issue>` runs the /fix pipeline instead, applying the winning patch only with --yes.
 async fn print_mode(config: Config, cwd: std::path::PathBuf, prompt: String, yes: bool, think: crate::llm::Think) -> Result<()> {
     let client = config.client();
-    let model = Arc::new(Mutex::new(config.coder.clone()));
-    let mode = SharedMode::new(if yes { Mode::Auto } else { Mode::Ask });
-    let mut agent = Agent::new(client, model, mode, Workspace::new(cwd.clone()));
-    agent.mcp.clone().start(&cwd).await;
-    *agent.think.lock().unwrap() = think;
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let turn = tokio::spawn(async move { agent.turn(prompt, &tx).await });
+    let turn = if let Some(issue) = prompt.strip_prefix("/fix ").map(str::trim).filter(|i| !i.is_empty()) {
+        let (issue, cwd) = (issue.to_string(), cwd.clone());
+        tokio::spawn(async move { crate::fix::run(client, config, cwd, issue, yes, tx).await })
+    } else {
+        let model = Arc::new(Mutex::new(config.coder.clone()));
+        let mode = SharedMode::new(if yes { Mode::Auto } else { Mode::Ask });
+        let mut agent = Agent::new(client, model, mode, Workspace::new(cwd.clone()));
+        agent.mcp.clone().start(&cwd).await;
+        *agent.think.lock().unwrap() = think;
+        tokio::spawn(async move { agent.turn(prompt, &tx).await })
+    };
     let mut out = std::io::stdout();
     let (mut steps, mut tools, mut prompt_tokens, mut cached, mut completion) = (0, 0, 0, 0, 0);
     while let Some(event) = rx.recv().await {
@@ -100,10 +125,16 @@ async fn print_mode(config: Config, cwd: std::path::PathBuf, prompt: String, yes
                 completion += c;
                 cached += k;
             }
+            // Only /fix asks here: the agent runs in auto mode with --yes, and its approvals are denied otherwise.
+            AgentEvent::Approval(req) if yes => {
+                eprintln!("[approved] {}", req.summary);
+                let _ = req.reply.send(Decision::Yes);
+            }
             AgentEvent::Approval(req) => {
                 eprintln!("[denied] {} (pass --yes to allow)", req.summary);
                 let _ = req.reply.send(Decision::No);
             }
+            AgentEvent::Fix(ev) => print_fix_event(ev),
             AgentEvent::Error(e) => eprintln!("error: {e}"),
             _ => {}
         }

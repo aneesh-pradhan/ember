@@ -19,10 +19,23 @@ use tokio::task::JoinSet;
 
 use crate::agent::{ask, AgentEvent, Decision, Events};
 use crate::config::{Config, Tier};
-use crate::llm::{Client, Message, Request, ToolSpec};
+use crate::llm::{Client, FunctionCall, Message, Request, ToolCall, ToolSpec};
 use crate::tools::{self, run_command, CommandOutput, Workspace};
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(900);
+
+/// A branch hands its edit back with this tool, and the test results come back as its result. A tool result keeps
+/// the branch's prompt cached on Token Factory; feedback sent as a new user message would re-bill its whole history.
+const RUN_TESTS: &str = "run_tests";
+
+fn run_tests_spec() -> ToolSpec {
+    ToolSpec::new(
+        RUN_TESTS,
+        "Run the reproduction test and then the full test suite on your current edits. Call it when your change is \
+         complete; the result says whether the fix passes or what still fails.",
+        json!({"type": "object", "properties": {}}),
+    )
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
@@ -570,14 +583,15 @@ impl Branch {
         }
         std::fs::write(&test_path, &self.repro.code)?;
         let ws = Workspace { root: self.root.clone(), protect_tests: true };
-        let specs = tools::specs(false).into_iter().filter(|s| s.function.name != "bash").collect::<Vec<_>>();
+        let mut specs = tools::specs(false).into_iter().filter(|s| s.function.name != "bash").collect::<Vec<_>>();
+        specs.push(run_tests_spec());
         let mut messages = vec![
             Message::system(
                 "You fix a bug by editing source code with the tools. A reproduction test fails because of the bug; \
                  your change must make it pass without breaking other tests. Test files are read-only. Follow the \
                  strategy you are given, keep the change minimal and in the codebase's style. Read files before \
-                 editing them. When your edit is complete, reply with a one-sentence summary and no tool calls; \
-                 the tests will then be run for you.",
+                 editing them. When your edit is complete, call run_tests; if something still fails, keep \
+                 working from its result.",
             ),
             Message::user(format!(
                 "BUG REPORT\n{}\n\nROOT CAUSE\n{}\n\nSTRATEGY: {}\n{}\n\nREPRODUCTION TEST ({}), run with `{}`\n```\n{}\n```\n\nCURRENT FAILURE\n{}",
@@ -597,12 +611,17 @@ impl Branch {
                 self.status("stopped", "another branch already passed");
                 return Ok(None);
             }
-            self.patch(&ws, &specs, &mut messages, round).await?;
+            let pending = self.patch(&ws, &specs, &mut messages, round).await?;
+            // Results answer the branch's run_tests call (a plain user message only if it ran out of steps).
+            let feedback = |text: String| match &pending {
+                Some(id) => Message::tool(id.clone(), text),
+                None => Message::user(text),
+            };
             self.status("testing", format!("round {round}: running reproduction test"));
             let repro = run_command(&self.root, &format!("{}{}", self.prefix, self.repro.command), TEST_TIMEOUT).await;
             if !repro.success() {
                 self.status("failing", format!("round {round}: reproduction test still fails"));
-                messages.push(Message::user(format!(
+                messages.push(feedback(format!(
                     "The reproduction test still fails:\n{}\nKeep working on the fix.",
                     tail(&repro.output, 3000)
                 )));
@@ -612,7 +631,7 @@ impl Branch {
             let suite = run_command(&self.root, &self.suite, TEST_TIMEOUT).await;
             if let Some(problem) = self.regression(&suite).await? {
                 self.status("regressed", format!("round {round}: {problem}"));
-                messages.push(Message::user(format!(
+                messages.push(feedback(format!(
                     "The reproduction test passes, but the full suite shows a regression: {problem}\n{}\nAdjust the fix.",
                     tail(&suite.output, 3000)
                 )));
@@ -628,7 +647,10 @@ impl Branch {
         Ok(None)
     }
 
-    async fn patch(&self, ws: &Workspace, specs: &[ToolSpec], messages: &mut Vec<Message>, round: usize) -> Result<()> {
+    /// Let the model edit until it calls run_tests, and return that call's id for the results. A reply without
+    /// tool calls counts as run_tests too: the call is added to it, which is safe because no request has included
+    /// that reply yet. None if the model used up its steps.
+    async fn patch(&self, ws: &Workspace, specs: &[ToolSpec], messages: &mut Vec<Message>, round: usize) -> Result<Option<String>> {
         for _ in 0..25 {
             let resp = self
                 .ctx
@@ -639,18 +661,38 @@ impl Branch {
                     ..Default::default()
                 })
                 .await?;
-            messages.push(Message::assistant(resp.content.clone(), resp.tool_calls.clone()));
+            let mut reply = Message::assistant(resp.content.clone(), resp.tool_calls.clone());
             if resp.tool_calls.is_empty() {
-                return Ok(());
+                let id = format!("run_tests_{}", messages.len());
+                reply.tool_calls.push(ToolCall {
+                    id: id.clone(),
+                    kind: "function".into(),
+                    function: FunctionCall { name: RUN_TESTS.into(), arguments: "{}".into() },
+                });
+                messages.push(reply);
+                return Ok(Some(id));
             }
+            messages.push(reply);
+            let mut run_tests = None;
             for call in &resp.tool_calls {
+                if call.function.name == RUN_TESTS {
+                    if run_tests.is_some() {
+                        messages.push(Message::tool(call.id.clone(), "(Duplicate call: the tests run once for this reply.)"));
+                    } else {
+                        run_tests = Some(call.id.clone());
+                    }
+                    continue;
+                }
                 let args = call.args();
                 self.status("running", format!("round {round}: {}", tools::summary(&call.function.name, &args)));
                 let out = tools::run(ws, &call.function.name, &args).await.unwrap_or_else(|e| format!("Error: {e}"));
                 messages.push(Message::tool(call.id.clone(), out));
             }
+            if run_tests.is_some() {
+                return Ok(run_tests);
+            }
         }
-        Ok(())
+        Ok(None)
     }
 
     /// None when the full suite shows no new failures compared with the baseline.
