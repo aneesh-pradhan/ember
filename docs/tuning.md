@@ -64,6 +64,7 @@ What it changed:
   reserved for the two single-call `/fix` decisions, and `/model ultra` warns about the cost.
 - **Almost every failure is `half_up`.** Its hidden test includes the float case `1.005 → 1.01`, which the task
   description doesn't mention. Only `Decimal(str(x))` passes it; `Decimal(x).quantize(...)` still rounds down.
+  This is deliberate: the case stays hidden to measure whether the agent tests beyond the report.
 
 The sample is small (3 runs per task), so differences of one pass are noise.
 
