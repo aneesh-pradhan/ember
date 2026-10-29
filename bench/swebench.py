@@ -97,10 +97,13 @@ def run_agent(rt: str, ember: Path, inst: dict, config: str, prompt: str, timeou
             stdout, stderr, timed_out = _text(e.stdout), _text(e.stderr), True
         seconds = time.time() - started
         (logs / f"{inst['instance_id']}.{config}.log").write_text(f"{stderr}\n--- stdout ---\n{stdout}")
-        # Stage everything (new files included) except ember's own state, then diff against the base commit.
+        # Stage everything (new files included) except ember's own state and binary files (build output such as
+        # Sphinx doctrees, which no reference patch contains and the grader can't apply), then diff against HEAD.
         diff = subprocess.run(
             [rt, "exec", "-w", "/testbed", name, "bash", "-c",
-             "git add -A -- . ':(exclude).ember' && git diff --cached --text HEAD"],
+             "git add -A -- . ':(exclude).ember' && "
+             "git diff --cached --numstat -z HEAD | awk -v RS='\\0' '$1 == \"-\" {print $3}' | "
+             "xargs -r -d '\\n' git reset -q -- && git diff --cached --text HEAD"],
             capture_output=True, **TEXT,
         ).stdout
         return {"patch": diff, "seconds": round(seconds, 1), "timed_out": timed_out,
