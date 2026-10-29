@@ -139,6 +139,30 @@ pub fn command_prefix(command: &str) -> Option<String> {
 /// the prompt, so the history stays cached.
 const ASK_USER: &str = "ask_user";
 
+/// Sent when a reply stops at the output token limit without a tool call, so the model finishes instead of
+/// leaving the turn half-answered.
+const CUT_OFF_NOTE: &str = "(Your last reply was cut off at the output token limit. Continue from where it stopped, \
+                            more concisely.)";
+const MAX_CONTINUATIONS: usize = 2;
+
+/// Why ember can't run a tool call as sent, worded for the model: an unknown tool, or arguments that aren't a JSON
+/// object (often because the reply hit the token limit partway through the call). Plan mode explains its own refusals.
+fn check_call(call: &ToolCall, specs: &[ToolSpec], plan: bool, cut_off: bool) -> Option<String> {
+    let name = call.function.name.as_str();
+    if !plan && !specs.iter().any(|s| s.function.name == name) {
+        let names: Vec<&str> = specs.iter().map(|s| s.function.name.as_str()).collect();
+        return Some(format!("Error: there is no tool named `{name}`. Available tools: {}.", names.join(", ")));
+    }
+    if !serde_json::from_str::<serde_json::Value>(&call.function.arguments).is_ok_and(|v| v.is_object()) {
+        let why = if cut_off { " Your reply hit the output token limit partway through this call." } else { "" };
+        return Some(format!(
+            "Error: the arguments for `{name}` aren't a valid JSON object.{why} Send the call again, and split large \
+             edits or file writes into smaller calls."
+        ));
+    }
+    None
+}
+
 fn ask_user_spec() -> ToolSpec {
     ToolSpec::new(
         ASK_USER,
@@ -389,6 +413,7 @@ impl Agent {
         if !plan {
             specs.extend(self.mcp.specs());
         }
+        let mut continuations = 0;
         for _ in 0..MAX_STEPS {
             let model = self.model.lock().unwrap().clone();
             let think = *self.think.lock().unwrap();
@@ -426,11 +451,21 @@ impl Agent {
                 reply.reasoning_content = Some(resp.reasoning.clone());
             }
             self.messages.push(reply);
+            let cut_off = resp.finish_reason.as_deref() == Some("length");
             if resp.tool_calls.is_empty() {
+                if cut_off && continuations < MAX_CONTINUATIONS {
+                    continuations += 1;
+                    self.messages.push(Message::user(CUT_OFF_NOTE));
+                    continue;
+                }
                 return Ok(());
             }
             let mut asked = false;
             for call in &resp.tool_calls {
+                if let Some(error) = check_call(call, &specs, plan, cut_off) {
+                    self.messages.push(Message::tool(call.id.clone(), error));
+                    continue;
+                }
                 if call.function.name == ASK_USER {
                     // Answered by the user's next message (see push_input).
                     let question = call.args()["question"].as_str().unwrap_or("").trim().to_string();
@@ -805,6 +840,19 @@ mod tests {
         a.answer_missing(false);
         a.push_input("third".into());
         assert_eq!(a.messages.last().unwrap().tool_call_id.as_deref(), Some("c2"));
+    }
+
+    #[test]
+    fn check_call_explains_unknown_tools_and_broken_arguments() {
+        let specs = vec![view_image_spec(), todo_spec()];
+        let call = |name: &str, args: &str| ToolCall { id: "c".into(), kind: "function".into(), function: FunctionCall { name: name.into(), arguments: args.into() } };
+        assert_eq!(check_call(&call("view_image", r#"{"path": "a.png"}"#), &specs, false, false), None);
+        let unknown = check_call(&call("read_files", "{}"), &specs, false, false).unwrap();
+        assert!(unknown.contains("no tool named `read_files`") && unknown.contains("view_image, update_todos"));
+        assert!(check_call(&call("read_files", "{}"), &specs, true, false).is_none(), "plan mode explains its own refusals");
+        let cut = check_call(&call("view_image", r#"{"path": "a.p"#), &specs, false, true).unwrap();
+        assert!(cut.contains("valid JSON object") && cut.contains("token limit"));
+        assert!(check_call(&call("view_image", "[1]"), &specs, false, false).unwrap().contains("valid JSON object"));
     }
 
     #[test]
