@@ -1,11 +1,17 @@
-# ember
+<h1 align="center">
+  <img src="docs/assets/banner.svg" alt="ember: a terminal coding agent for NVIDIA Nemotron" width="100%">
+</h1>
 
-[![CI](https://github.com/aneesh-pradhan/ember/actions/workflows/ci.yml/badge.svg)](https://github.com/aneesh-pradhan/ember/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/aneesh-pradhan/ember)](https://github.com/aneesh-pradhan/ember/releases/latest)
-[![License: MIT](https://img.shields.io/github/license/aneesh-pradhan/ember)](LICENSE)
-![Rust 1.80+](https://img.shields.io/badge/rust-1.80%2B-orange)
+<p align="center">
+  <a href="https://github.com/aneesh-pradhan/ember/actions/workflows/ci.yml"><img src="https://github.com/aneesh-pradhan/ember/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/aneesh-pradhan/ember/releases/latest"><img src="https://img.shields.io/github/v/release/aneesh-pradhan/ember?color=ff85c0" alt="Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/aneesh-pradhan/ember?color=c4a2ff" alt="License: MIT"></a>
+  <img src="https://img.shields.io/badge/rust-1.80%2B-ff7a3d?logo=rust" alt="Rust 1.80+">
+  <img src="https://img.shields.io/badge/NVIDIA-Nemotron-76b900?logo=nvidia&logoColor=white" alt="NVIDIA Nemotron">
+  <a href="https://tokenfactory.nebius.com"><img src="https://img.shields.io/badge/Nebius-Token%20Factory-8cc4ff" alt="Nebius Token Factory"></a>
+</p>
 
-**A terminal coding agent powered by NVIDIA Nemotron on Nebius Token Factory, written in Rust.**
+<p align="center"><b>A terminal coding agent powered by NVIDIA Nemotron on Nebius Token Factory, written in Rust.</b></p>
 
 ember lives in your terminal. Ask it to explain code, build a feature, or fix a failing build. It reads
 and searches your project, edits files, and runs commands. Before any edit or command, it shows you
