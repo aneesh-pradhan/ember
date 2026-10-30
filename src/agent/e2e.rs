@@ -253,3 +253,58 @@ async fn names_new_files_by_full_path() {
     }).collect();
     assert_eq!(notes, [format!("New files: {}", dir.join("site/index.html").display())]);
 }
+
+/// Several new files in one write_file call: one approval, all written, listed together, and undone together.
+/// A batch with one bad path writes nothing.
+#[tokio::test]
+async fn batched_writes_need_one_approval_and_undo_together() {
+    let dir = project(&[]);
+    let files = json!({"files": [
+        {"path": "data/a1.txt", "content": "A 0 0\nB 3 4\n"},
+        {"path": "data/a2.txt", "content": "A 0 0\n"}]});
+    let bad = json!({"files": [{"path": "ok.txt", "content": "x"}, {"path": "../escape.txt", "content": "x"}]});
+    let model = MockModel::start(vec![
+        Reply::Tools(vec![call("write_file", files)]),
+        Reply::Tools(vec![call("write_file", bad)]),
+        Reply::Text("Done."),
+    ])
+    .await;
+    let mut a = agent(&model, &dir, Mode::Ask);
+    let events = turn(&mut a, "write the data files", Decision::Yes).await;
+
+    assert_eq!(approvals(&events), ["Write data/a1.txt, data/a2.txt (2 files)", "Write ok.txt, ../escape.txt (2 files)"]);
+    assert_eq!(std::fs::read_to_string(dir.join("data/a1.txt")).unwrap(), "A 0 0\nB 3 4\n");
+    let results = tool_results(&model.requests()[1]);
+    assert!(results[0].contains("Created data/a1.txt (2 lines)") && results[0].contains("Created data/a2.txt"), "{results:?}");
+    let bad_result = &tool_results(&model.requests()[2])[0];
+    assert!(bad_result.contains("File 2 of 2") && bad_result.contains("No files were written"), "{bad_result}");
+    assert!(!dir.join("ok.txt").exists(), "a failed batch wrote a file");
+
+    let (_, restored) = a.undo().expect("undo");
+    assert_eq!(restored, ["data/a1.txt", "data/a2.txt"]);
+    assert!(!dir.join("data/a1.txt").exists() && !dir.join("data/a2.txt").exists());
+}
+
+/// Near the step limit the model is told to wrap up, in a tool result (so the request still extends the last one),
+/// and the turn stops at the limit.
+#[tokio::test]
+async fn warns_before_the_step_limit_and_stops_at_it() {
+    let dir = project(&[("a.txt", "alpha\n")]);
+    let read = || Reply::Tools(vec![call("read_file", json!({"path": "a.txt"}))]);
+    let model = MockModel::start((0..8).map(|_| read()).collect()).await;
+    let mut a = agent(&model, &dir, Mode::Ask).with_max_steps(Some(7));
+    let events = turn(&mut a, "keep reading", Decision::No).await;
+
+    let requests = model.requests();
+    assert_eq!(requests.len(), 7);
+    let warned: Vec<usize> = requests.iter().enumerate()
+        .filter(|(_, r)| tool_results(r).iter().any(|t| t.contains("steps left in this turn")))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(warned.first(), Some(&2), "the note arrives with step 2's result, 5 steps before the limit of 7");
+    for pair in requests.windows(2) {
+        let (prev, next) = (messages(&pair[0]), messages(&pair[1]));
+        assert_eq!(&next[..prev.len()], &prev[..], "the note rewrote an earlier message");
+    }
+    assert!(events.iter().any(|e| matches!(e, AgentEvent::Notice(n) if n.starts_with("Stopped after 7 steps"))));
+}

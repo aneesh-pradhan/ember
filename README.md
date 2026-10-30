@@ -129,6 +129,8 @@ ember "why does the build fail?"   # start with a prompt
 ember -c                           # continue the last conversation in this directory
 ember --plan                       # start in plan mode
 ember -p "summarize src/"          # print mode: answer and exit (edits/commands denied unless --yes)
+ember -p -c "keep going"           # print mode, continuing the last conversation here
+ember --max-steps 150 -p --yes "…" # allow more model calls per turn (default 80)
 ember --model ultra                # pick the model tier
 ```
 

@@ -147,11 +147,17 @@ pub fn specs(read_only: bool) -> Vec<ToolSpec> {
             ),
             ToolSpec::new(
                 "write_file",
-                "Create a file or overwrite it entirely. Prefer edit_file for changes to existing files.",
+                "Create files or overwrite them entirely. Prefer edit_file for changes to existing files. Send one \
+                 file with path and content, or several with `files`: put every new file you have planned (sources, \
+                 tests, data files) in one call.",
                 json!({"type": "object", "properties": {
                     "path": {"type": "string"},
-                    "content": {"type": "string"}},
-                    "required": ["path", "content"]}),
+                    "content": {"type": "string"},
+                    "files": {"type": "array", "description": "Several files written together", "items": {
+                        "type": "object", "properties": {
+                            "path": {"type": "string"},
+                            "content": {"type": "string"}},
+                        "required": ["path", "content"]}}}}),
             ),
             ToolSpec::new(
                 "bash",
@@ -188,7 +194,12 @@ pub fn summary(name: &str, args: &Value) -> String {
             let count = if edits.len() > 1 { format!(" ({} edits)", edits.len()) } else { String::new() };
             format!("Edit {}{count}", paths.join(", "))
         }
-        "write_file" => format!("Write {}", s(args, "path")),
+        "write_file" => {
+            let files = write_list(args);
+            let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+            let count = if files.len() > 1 { format!(" ({} files)", files.len()) } else { String::new() };
+            format!("Write {}{count}", paths.join(", "))
+        }
         "bash" => format!("Run `{}`", one_line(s(args, "command"), 100)),
         "web_search" => format!("Web search \"{}\"", one_line(s(args, "query"), 80)),
         "web_fetch" => format!("Fetch {}", one_line(s(args, "url"), 100)),
@@ -205,9 +216,13 @@ pub fn preview(ws: &Workspace, name: &str, args: &Value) -> Option<String> {
             Some(changes.iter().map(|c| diff(&ws.rel(&c.path), &c.old, &c.new)).collect())
         }
         "write_file" => {
-            let path = ws.resolve(s(args, "path")).ok()?;
-            let old = std::fs::read_to_string(&path).unwrap_or_default();
-            Some(diff(&ws.rel(&path), &old, s(args, "content")))
+            let mut out = String::new();
+            for file in write_list(args) {
+                let path = ws.resolve(&file.path).ok()?;
+                let old = std::fs::read_to_string(&path).unwrap_or_default();
+                out.push_str(&diff(&ws.rel(&path), &old, &file.content));
+            }
+            Some(out)
         }
         "bash" => Some(s(args, "command").to_string()),
         _ => None,
@@ -387,7 +402,13 @@ fn replace(text: &str, old: &str, new: &str, replace_all: bool) -> Result<String
         return Ok(if replace_all { text.replace(old, new) } else { text.replacen(old, new, 1) });
     }
     if count > 1 {
-        return Err(format!("old_string matches {count} places; include more surrounding lines or set replace_all"));
+        // Say where, so the model can pick lines that make it unique without reading the file again.
+        let lines: Vec<String> = text.match_indices(old).take(8).map(|(at, _)| (text[..at].matches('\n').count() + 1).to_string()).collect();
+        let more = if count > lines.len() { ", …" } else { "" };
+        return Err(format!(
+            "old_string matches {count} places (lines {}{more}); include more surrounding lines to make it unique, or set replace_all",
+            lines.join(", ")
+        ));
     }
     let lines: Vec<&str> = text.split_inclusive('\n').collect();
     let needle: Vec<&str> = old.trim_matches('\n').lines().map(str::trim_end).collect();
@@ -534,21 +555,49 @@ fn edit_file(ws: &Workspace, args: &Value) -> Result<String, String> {
     Ok(changes.iter().map(|c| diff(&ws.rel(&c.path), &c.old, &c.new)).collect())
 }
 
-fn write_file(ws: &Workspace, args: &Value) -> Result<String, String> {
-    let rel = s(args, "path");
-    let path = ws.resolve(rel)?;
-    check_writable(ws, &ws.rel(&path))?;
-    let old = std::fs::read_to_string(&path).unwrap_or_default();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+/// One file requested of write_file.
+pub struct FileWrite {
+    pub path: String,
+    content: String,
+}
+
+/// The files in a write_file call: the `files` list, or the single path/content form.
+pub fn write_list(args: &Value) -> Vec<FileWrite> {
+    let one = |v: &Value| FileWrite { path: s(v, "path").to_string(), content: s(v, "content").to_string() };
+    match args["files"].as_array().filter(|f| !f.is_empty()) {
+        Some(files) => files.iter().map(one).collect(),
+        None => vec![one(args)],
     }
-    let content = s(args, "content");
-    std::fs::write(&path, content).map_err(|e| e.to_string())?;
-    Ok(if old.is_empty() {
-        format!("Created {} ({} lines)", ws.rel(&path), content.lines().count())
-    } else {
-        diff(&ws.rel(&path), &old, content)
-    })
+}
+
+/// Write every file, or none: all paths are checked before anything is written.
+fn write_file(ws: &Workspace, args: &Value) -> Result<String, String> {
+    let files = write_list(args);
+    let mut planned = vec![];
+    for (i, file) in files.iter().enumerate() {
+        let which = if files.len() > 1 { format!("File {} of {}: ", i + 1, files.len()) } else { String::new() };
+        let rest = if files.len() > 1 { " No files were written." } else { "" };
+        if file.path.trim().is_empty() {
+            return Err(format!("{which}no path given{rest}"));
+        }
+        let path = ws.resolve(&file.path).map_err(|e| format!("{which}{e}{rest}"))?;
+        check_writable(ws, &ws.rel(&path)).map_err(|e| format!("{which}{e}{rest}"))?;
+        planned.push((path, file));
+    }
+    let mut out = vec![];
+    for (path, file) in planned {
+        let old = std::fs::read_to_string(&path).unwrap_or_default();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(&path, &file.content).map_err(|e| format!("{}: {e}", ws.rel(&path)))?;
+        out.push(if old.is_empty() {
+            format!("Created {} ({} lines)", ws.rel(&path), file.content.lines().count())
+        } else {
+            diff(&ws.rel(&path), &old, &file.content)
+        });
+    }
+    Ok(out.join("\n"))
 }
 
 #[derive(Debug)]
@@ -574,6 +623,10 @@ impl CommandOutput {
 }
 
 /// Run `bash -c command` in `dir`, capturing stdout and stderr together.
+///
+/// The command gets its own process group. On a timeout, or when the caller stops waiting (an interrupted turn), the
+/// whole group is killed, so test runners, servers and other children don't outlive it. Background processes the
+/// command starts and leaves running (`server &`) are left alone when it finishes normally.
 pub async fn run_command(dir: &Path, command: &str, timeout: Duration) -> CommandOutput {
     let child = Command::new("bash")
         .arg("-c")
@@ -581,28 +634,64 @@ pub async fn run_command(dir: &Path, command: &str, timeout: Duration) -> Comman
         .current_dir(dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
+        .process_group(0)
         .kill_on_drop(true)
         .spawn();
     let mut child = match child {
         Ok(c) => c,
         Err(e) => return CommandOutput { code: None, output: format!("failed to start: {e}"), timed_out: false },
     };
+    let mut group = ProcessGroup(child.id());
     let mut stdout = child.stdout.take().expect("piped stdout");
     let mut buf = Vec::new();
     let result = tokio::time::timeout(timeout, async {
-        let _ = stdout.read_to_end(&mut buf).await;
-        child.wait().await
+        let mut reading = std::pin::pin!(read_all(&mut stdout, &mut buf));
+        tokio::select! {
+            _ = &mut reading => child.wait().await,
+            status = child.wait() => {
+                // bash is done, but something it started in the background may still hold the output open.
+                let _ = tokio::time::timeout(Duration::from_millis(200), reading).await;
+                status
+            }
+        }
     })
     .await;
     match result {
-        Ok(status) => CommandOutput {
-            code: status.ok().and_then(|s| s.code()),
-            output: String::from_utf8_lossy(&buf).into_owned(),
-            timed_out: false,
-        },
+        Ok(status) => {
+            group.0 = None;
+            CommandOutput {
+                code: status.ok().and_then(|s| s.code()),
+                output: String::from_utf8_lossy(&buf).into_owned(),
+                timed_out: false,
+            }
+        }
         Err(_) => {
+            drop(group);
             let _ = child.kill().await;
             CommandOutput { code: None, output: String::from_utf8_lossy(&buf).into_owned(), timed_out: true }
+        }
+    }
+}
+
+/// Read until end of file. Cancel-safe: `buf` keeps everything read before the future is dropped.
+async fn read_all(stdout: &mut tokio::process::ChildStdout, buf: &mut Vec<u8>) {
+    let mut chunk = [0u8; 8192];
+    while let Ok(n @ 1..) = stdout.read(&mut chunk).await {
+        buf.extend_from_slice(&chunk[..n]);
+    }
+}
+
+/// Kills a command's process group when dropped, unless its id was taken out first.
+struct ProcessGroup(Option<u32>);
+
+impl Drop for ProcessGroup {
+    fn drop(&mut self) {
+        if let Some(id) = self.0.and_then(|id| i32::try_from(id).ok()) {
+            // SAFETY: killpg only sends a signal. The group id is the child's pid, and a pid isn't handed out again
+            // while it's still in use as a process group id.
+            unsafe {
+                libc::killpg(id, libc::SIGKILL);
+            }
         }
     }
 }
@@ -646,11 +735,41 @@ pub fn one_line(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
+    /// Whether a process is gone (or a zombie waiting to be reaped).
+    fn exited(pid: &str) -> bool {
+        let out = std::process::Command::new("ps").args(["-o", "stat=", "-p", pid]).output().unwrap();
+        !out.status.success() || String::from_utf8_lossy(&out.stdout).trim().starts_with('Z')
+    }
+
+    #[tokio::test]
+    async fn timeouts_kill_the_whole_process_group() {
+        let dir = std::env::temp_dir().join(format!("ember-pgroup-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = run_command(&dir, "sleep 30 & echo $! > child.pid; wait", Duration::from_millis(500)).await;
+        assert!(out.timed_out);
+        let pid = std::fs::read_to_string(dir.join("child.pid")).unwrap();
+        let start = std::time::Instant::now();
+        while !exited(pid.trim()) {
+            assert!(start.elapsed() < Duration::from_secs(5), "the command's child {pid} outlived the timeout");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn background_processes_dont_hold_the_command_open() {
+        let start = std::time::Instant::now();
+        let out = run_command(&std::env::temp_dir(), "sleep 3 & echo started", Duration::from_secs(20)).await;
+        assert!(!out.timed_out);
+        assert_eq!((out.code, out.output.trim()), (Some(0), "started"));
+        assert!(start.elapsed() < Duration::from_secs(2), "waited {:?} for the background sleep", start.elapsed());
+    }
+
     #[test]
     fn edit_exact_and_whitespace_tolerant() {
         assert_eq!(apply_edit("a\nb\n", "b", "c", false).unwrap(), "a\nc\n");
         assert_eq!(apply_edit("x = 1   \ny = 2\n", "x = 1\ny = 2\n", "z\n", false).unwrap(), "z\n");
-        assert!(apply_edit("a\na\n", "a", "b", false).unwrap_err().contains("2 places"));
+        assert!(apply_edit("a\na\n", "a", "b", false).unwrap_err().contains("2 places (lines 1, 2)"));
         assert_eq!(apply_edit("a\na\n", "a", "b", true).unwrap(), "b\nb\n");
         assert!(apply_edit("a\n", "zzz", "b", false).is_err());
         assert_eq!(apply_edit("x\ny\n", "y\n", "z", false).unwrap(), "x\nz\n");

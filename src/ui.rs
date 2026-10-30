@@ -61,6 +61,9 @@ const COMMANDS: &[(&str, &str, bool)] = &[
     ("quit", "exit ember", false),
 ];
 
+/// The pinned header: three rows of mini mascot and a rule.
+const HEADER_HEIGHT: u16 = 4;
+
 const INIT_PROMPT: &str = "Explore this repository and write an AGENTS.md at its root to guide future coding sessions. \
 Cover: what the project is; how the code is organized (key directories and files); exact commands to build, run, test \
 and lint; code conventions you observe; and anything surprising or easy to get wrong. Keep it under about 80 lines and \
@@ -82,6 +85,8 @@ pub struct App {
     live_tool: Option<String>,
     /// The mascot's reaction to the last tool result (happy after passing tests, sad after a failure), and when.
     reaction: Option<(theme::Mood, Instant)>,
+    /// Pin a compact header once the banner scrolls away (EMBER_HEADER=off turns it off).
+    header: bool,
     approval: Option<ApprovalRequest>,
     fix: Option<FixView>,
     todos: Vec<Todo>,
@@ -137,6 +142,7 @@ pub async fn run(
     initial: Option<String>,
     resume_last: bool,
     think: crate::llm::Think,
+    max_steps: Option<usize>,
 ) -> Result<()> {
     let (tx, rx) = mpsc::unbounded_channel();
     let client = config.client();
@@ -144,7 +150,8 @@ pub async fn run(
     let mode = SharedMode::new(mode);
     let agent = Agent::new(client.clone(), model.clone(), mode.clone(), Workspace::new(cwd.clone()))
         .interactive()
-        .with_draft_model(config.draft.clone());
+        .with_draft_model(config.draft.clone())
+        .with_max_steps(max_steps);
     *agent.think.lock().unwrap() = think;
     let (mcp, mcp_cwd) = (agent.mcp.clone(), cwd.clone());
     tokio::spawn(async move { mcp.start(&mcp_cwd).await });
@@ -163,6 +170,7 @@ pub async fn run(
         live_reasoning: String::new(),
         live_tool: None,
         reaction: None,
+        header: !matches!(std::env::var("EMBER_HEADER").as_deref(), Ok("off" | "0" | "false")),
         approval: None,
         fix: None,
         todos: vec![],
@@ -1386,6 +1394,15 @@ impl App {
         let live = markdown::wrap(&self.live_lines(width), width);
         let gap = usize::from(!live.is_empty());
         let total = self.wrapped.len() + gap + live.len();
+        // Once the startup banner's top has scrolled off, pin a compact header (mini mascot, mood, model) above the
+        // conversation. Taking its rows only moves the view further from the banner, so this doesn't flicker.
+        let mut area = area;
+        let first_visible = total.saturating_sub(self.scroll.min(total)).saturating_sub(area.height as usize);
+        if self.header && area.height >= 16 && first_visible > 0 {
+            let [header, rest] = Layout::vertical([Constraint::Length(HEADER_HEIGHT), Constraint::Min(1)]).areas(area);
+            self.render_header(f, header);
+            area = rest;
+        }
         let height = area.height as usize;
         self.body_height = height;
         self.scroll = self.scroll.min(total.saturating_sub(height));
@@ -1404,6 +1421,68 @@ impl App {
             let spot = Rect { x: area.right() - w, y: area.bottom() - 1, width: w, height: 1 };
             Paragraph::new(Line::styled(note, theme::accent().add_modifier(Modifier::REVERSED))).render(spot, f.buffer_mut());
         }
+    }
+
+    /// The pinned header: the mini mascot, then ember's name and face, what it's up to, and the model and folder,
+    /// over a thin rule.
+    fn render_header(&self, f: &mut Frame, area: Rect) {
+        let (mood, doing) = self.header_mood();
+        let face = theme::face(mood).map(|face| Span::styled(format!("  {face}"), theme::accent()));
+        let model = self.model.lock().unwrap().clone();
+        let tier = [Tier::Fast, Tier::Coder, Tier::Reasoner].into_iter().find(|t| self.config.model(*t) == model);
+        let info: [Vec<Span<'static>>; 3] = [
+            [
+                Span::styled("ember", theme::accent().add_modifier(Modifier::BOLD)),
+                Span::styled(format!(" v{}", env!("CARGO_PKG_VERSION")), theme::dim()),
+            ]
+            .into_iter()
+            .chain(face)
+            .collect(),
+            vec![Span::styled(doing, theme::bold())],
+            vec![
+                Span::styled(tier.map_or("custom", |t| t.label()).to_string(), tier.map_or(theme::bold(), theme::tier)),
+                Span::styled(format!(" {}  ·  {}", model.rsplit('/').next().unwrap_or(""), self.short_cwd()), theme::dim()),
+            ],
+        ];
+        let mut lines: Vec<Line> = logo::mini_mascot(self.frame, mood)
+            .into_iter()
+            .zip(info)
+            .map(|(sprite, text)| {
+                let mut spans = vec![Span::raw(" ")];
+                spans.extend(sprite.spans);
+                spans.push(Span::raw("  "));
+                spans.extend(text);
+                Line::from(spans)
+            })
+            .collect();
+        lines.push(Line::styled("─".repeat(area.width as usize), theme::dim()));
+        Paragraph::new(lines).render(area, f.buffer_mut());
+    }
+
+    /// The header mascot's mood and a few words on what ember is doing.
+    fn header_mood(&self) -> (theme::Mood, String) {
+        use theme::Mood;
+        let kawaii = theme::face(Mood::Idle).is_some();
+        if let Some((mood, _)) = self.reaction.filter(|(_, at)| at.elapsed() < Duration::from_secs(4)) {
+            let text = match mood {
+                Mood::Happy => "tests pass!",
+                _ => "hmm, that didn't work",
+            };
+            return (mood, text.into());
+        }
+        if self.task.is_none() {
+            return (Mood::Idle, if kawaii { "ready when you are ♡" } else { "ready" }.into());
+        }
+        let elapsed = self.task_started.elapsed().as_secs();
+        let mood = self.mood(elapsed);
+        let text = match (&self.live_tool, mood) {
+            (Some(tool), _) => tools::one_line(tool, 60),
+            (None, Mood::Thinking) => "thinking…".into(),
+            (None, Mood::Sweaty) => format!("this one's chewy… {elapsed}s"),
+            _ if !self.live_text.is_empty() => "writing…".into(),
+            _ => "working…".into(),
+        };
+        (mood, text)
     }
 
     fn render_input(&self, f: &mut Frame, area: Rect) {

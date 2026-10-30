@@ -8,6 +8,7 @@ mod input;
 mod llm;
 mod logo;
 mod markdown;
+mod math;
 mod mcp;
 mod permissions;
 #[cfg(test)]
@@ -51,9 +52,12 @@ struct Cli {
     /// Nemotron reasoning for the agent: on (default), low or off.
     #[arg(long, value_name = "LEVEL")]
     think: Option<String>,
-    /// Continue the most recent conversation in this directory.
+    /// Continue the most recent conversation in this directory (with -p, the prompt is the next message).
     #[arg(short = 'c', long = "continue")]
     resume: bool,
+    /// Model calls allowed per turn before ember stops and asks to continue (default 80, or EMBER_MAX_STEPS).
+    #[arg(long, value_name = "N")]
+    max_steps: Option<usize>,
 }
 
 /// One stderr line per /fix event worth logging in print mode.
@@ -97,15 +101,25 @@ async fn main() -> Result<()> {
     };
     if cli.print {
         let prompt = cli.prompt.unwrap_or_default();
-        return print_mode(config, cwd, prompt, cli.yes, think).await;
+        let options = PrintOptions { yes: cli.yes, think, resume: cli.resume, max_steps: cli.max_steps };
+        return print_mode(config, cwd, prompt, options).await;
     }
     let mode = if cli.yes { Mode::Auto } else if cli.plan { Mode::Plan } else { Mode::Ask };
-    ui::run(config, cwd, mode, cli.prompt, cli.resume, think).await
+    ui::run(config, cwd, mode, cli.prompt, cli.resume, think, cli.max_steps).await
+}
+
+struct PrintOptions {
+    yes: bool,
+    think: crate::llm::Think,
+    /// Continue the most recent conversation in this directory, with the prompt as the next message.
+    resume: bool,
+    max_steps: Option<usize>,
 }
 
 /// Non-interactive mode: stream the answer to stdout. Mutating tools are denied unless --yes.
 /// `/fix <issue>` runs the /fix pipeline instead, applying the winning patch only with --yes.
-async fn print_mode(config: Config, cwd: std::path::PathBuf, prompt: String, yes: bool, think: crate::llm::Think) -> Result<()> {
+async fn print_mode(config: Config, cwd: std::path::PathBuf, prompt: String, options: PrintOptions) -> Result<()> {
+    let PrintOptions { yes, think, resume, max_steps } = options;
     let client = config.client();
     let pricing = config.clone();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -115,7 +129,16 @@ async fn print_mode(config: Config, cwd: std::path::PathBuf, prompt: String, yes
     } else {
         let model = Arc::new(Mutex::new(config.coder.clone()));
         let mode = SharedMode::new(if yes { Mode::Auto } else { Mode::Ask });
-        let mut agent = Agent::new(client, model, mode, Workspace::new(cwd.clone()));
+        let mut agent = Agent::new(client, model, mode, Workspace::new(cwd.clone())).with_max_steps(max_steps);
+        if resume {
+            match crate::session::list(&cwd.display().to_string()).into_iter().next() {
+                Some(saved) => {
+                    eprintln!("[resume] {} ({} messages)", saved.title, saved.messages.len());
+                    agent.resume(saved);
+                }
+                None => eprintln!("[resume] no saved conversation in this directory; starting a new one"),
+            }
+        }
         let untrusted = crate::mcp::untrusted(&cwd);
         if !untrusted.is_empty() {
             eprintln!(

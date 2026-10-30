@@ -377,6 +377,7 @@ dependencies = [
  "dotenvy",
  "futures-util",
  "ignore",
+ "libc",
  "pulldown-cmark",
  "ratatui",
  "regex",
