@@ -17,7 +17,11 @@ use crate::mcp::Mcp;
 use crate::session::{self, Session};
 use crate::tools::{self, Workspace};
 
-const MAX_STEPS: usize = 80;
+/// Model calls per turn, unless EMBER_MAX_STEPS or `--max-steps` says otherwise.
+const DEFAULT_MAX_STEPS: usize = 80;
+/// How many steps before the limit the model is told to wrap up, so a long task ends with a summary of what's done
+/// and what's left instead of stopping mid-edit.
+const WRAP_UP_STEPS: usize = 5;
 /// Compact automatically once the conversation fills this share of the context window.
 const AUTO_COMPACT_AT: f64 = 0.8;
 const COMPACT_ACK: &str = "Got it. I'll continue from that summary.";
@@ -227,6 +231,8 @@ pub struct Agent {
     interactive: bool,
     /// The model for /compact summaries; the current model when unset.
     draft_model: Option<String>,
+    /// Model calls allowed per turn.
+    max_steps: usize,
     /// Where approvals are saved per project (`/permissions save`); None when there's no config directory.
     permissions_file: Option<PathBuf>,
 }
@@ -250,6 +256,7 @@ impl Agent {
             keep_reasoning: !matches!(std::env::var("EMBER_KEEP_REASONING").as_deref(), Ok("0" | "false" | "off")),
             interactive: false,
             draft_model: None,
+            max_steps: std::env::var("EMBER_MAX_STEPS").ok().and_then(|n| n.parse().ok()).unwrap_or(DEFAULT_MAX_STEPS).max(1),
             permissions_file: crate::permissions::file(),
         };
         agent.reset();
@@ -278,6 +285,13 @@ impl Agent {
     /// For the full-screen UI: offer `ask_user` and send follow-up messages as its result.
     pub fn interactive(mut self) -> Self {
         self.interactive = true;
+        self
+    }
+
+    pub fn with_max_steps(mut self, steps: Option<usize>) -> Self {
+        if let Some(steps) = steps {
+            self.max_steps = steps.max(1);
+        }
         self
     }
 
@@ -468,7 +482,7 @@ impl Agent {
             specs.extend(self.mcp.specs());
         }
         let mut continuations = 0;
-        for _ in 0..MAX_STEPS {
+        for step in 1..=self.max_steps {
             let model = self.model.lock().unwrap().clone();
             let think = *self.think.lock().unwrap();
             let request = Request {
@@ -536,8 +550,19 @@ impl Agent {
             if asked {
                 return Ok(());
             }
+            // Appended to this step's last tool result rather than sent as a new user message, so the request
+            // still only extends the previous one (see ASK_USER).
+            if self.max_steps - step == WRAP_UP_STEPS {
+                if let Some(last) = self.messages.last_mut().filter(|m| m.role == "tool") {
+                    last.content.push_str(&format!(
+                        "\n\n(ember: {WRAP_UP_STEPS} steps left in this turn. Finish the change you're making, then reply \
+                         with a summary of what's done and what still needs doing.)"
+                    ));
+                }
+            }
         }
-        let _ = tx.send(AgentEvent::Notice(format!("Stopped after {MAX_STEPS} steps; say \"continue\" to keep going.")));
+        let steps = self.max_steps;
+        let _ = tx.send(AgentEvent::Notice(format!("Stopped after {steps} steps; say \"continue\" to keep going.")));
         Ok(())
     }
 
@@ -549,7 +574,7 @@ impl Agent {
     fn snapshot(&mut self, name: &str, args: &serde_json::Value) {
         let paths: Vec<String> = match name {
             "edit_file" => tools::edit_list(args).into_iter().map(|e| e.path).collect(),
-            "write_file" => vec![args["path"].as_str().unwrap_or("").to_string()],
+            "write_file" => tools::write_list(args).into_iter().map(|f| f.path).collect(),
             _ => return,
         };
         let Some(checkpoint) = self.checkpoints.last_mut() else { return };
@@ -568,7 +593,9 @@ impl Agent {
         for (path, original) in checkpoint.files.iter().rev() {
             let ok = match original {
                 Some(bytes) => std::fs::write(path, bytes).is_ok(),
-                None => std::fs::remove_file(path).is_ok() || !path.exists(),
+                // Snapshotted before a write that then failed: nothing to undo.
+                None if !path.exists() => continue,
+                None => std::fs::remove_file(path).is_ok(),
             };
             if ok {
                 restored.push(self.ws.rel(path));
