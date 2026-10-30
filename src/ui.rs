@@ -384,7 +384,7 @@ impl App {
             Ok(None) => {}
         }
         if allowed.is_empty() {
-            self.print_notice("Edits and commands ask first. Choose \"always\" at a prompt to allow more for this session.");
+            self.print_notice("Edits, commands and web fetches ask first. Choose \"always\" at a prompt to allow more for this session.");
             return;
         }
         let mut lines = vec![Line::styled("  Allowed without asking:", theme::bold())];
@@ -392,7 +392,11 @@ impl App {
             lines.push(Line::styled(format!("    `{command}` commands"), theme::dim()));
         }
         for tool in &allowed.tools {
-            lines.push(Line::styled(format!("    {tool}"), theme::dim()));
+            let text = match tool.strip_prefix("web_fetch:") {
+                Some(host) => format!("fetches from {host}"),
+                None => tool.clone(),
+            };
+            lines.push(Line::styled(format!("    {text}"), theme::dim()));
         }
         if arg.is_empty() {
             lines.push(Line::styled(
