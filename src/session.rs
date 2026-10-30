@@ -28,6 +28,10 @@ pub fn new_id() -> String {
 }
 
 fn dir() -> Option<PathBuf> {
+    // Tests drive real agent turns, which save sessions: keep those out of the user's history.
+    if cfg!(test) {
+        return Some(std::env::temp_dir().join(format!("ember-test-sessions-{}", std::process::id())));
+    }
     dirs::data_dir().map(|d| d.join("ember").join("sessions"))
 }
 
