@@ -18,6 +18,7 @@ from. The key is the only required setting for Token Factory.
 | `EMBER_THINK_BUDGET` | `4096` reasoning tokens per request on Token Factory, no cap elsewhere; a number, or `off` |
 | `EMBER_KEEP_REASONING` | `on`: each step's reasoning is sent back to the model for the rest of the task; `0` turns it off |
 | `EMBER_NO_WEB` | unset; `1` removes the `web_search` and `web_fetch` tools (used by the SWE-bench runner) |
+| `EMBER_MAX_STEPS` | `80` model calls per turn; ember asks the model to wrap up 5 steps before the limit. `--max-steps` overrides it |
 | `EMBER_VERBOSE` | unset; `1` makes `ember -p "/fix …"` log every tool call its branches make (`[fix:activity]` lines on stderr) |
 | `EMBER_MOUSE` | `on`; `off` keeps your terminal's normal text selection (no wheel scrolling) |
 | `EMBER_HEADER` | `on`: once the startup banner scrolls away, a compact header (mini mascot, its mood, model and folder) stays pinned at the top; `off` turns it off |

@@ -147,11 +147,17 @@ pub fn specs(read_only: bool) -> Vec<ToolSpec> {
             ),
             ToolSpec::new(
                 "write_file",
-                "Create a file or overwrite it entirely. Prefer edit_file for changes to existing files.",
+                "Create files or overwrite them entirely. Prefer edit_file for changes to existing files. Send one \
+                 file with path and content, or several with `files`: put every new file you have planned (sources, \
+                 tests, data files) in one call.",
                 json!({"type": "object", "properties": {
                     "path": {"type": "string"},
-                    "content": {"type": "string"}},
-                    "required": ["path", "content"]}),
+                    "content": {"type": "string"},
+                    "files": {"type": "array", "description": "Several files written together", "items": {
+                        "type": "object", "properties": {
+                            "path": {"type": "string"},
+                            "content": {"type": "string"}},
+                        "required": ["path", "content"]}}}}),
             ),
             ToolSpec::new(
                 "bash",
@@ -188,7 +194,12 @@ pub fn summary(name: &str, args: &Value) -> String {
             let count = if edits.len() > 1 { format!(" ({} edits)", edits.len()) } else { String::new() };
             format!("Edit {}{count}", paths.join(", "))
         }
-        "write_file" => format!("Write {}", s(args, "path")),
+        "write_file" => {
+            let files = write_list(args);
+            let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+            let count = if files.len() > 1 { format!(" ({} files)", files.len()) } else { String::new() };
+            format!("Write {}{count}", paths.join(", "))
+        }
         "bash" => format!("Run `{}`", one_line(s(args, "command"), 100)),
         "web_search" => format!("Web search \"{}\"", one_line(s(args, "query"), 80)),
         "web_fetch" => format!("Fetch {}", one_line(s(args, "url"), 100)),
@@ -205,9 +216,13 @@ pub fn preview(ws: &Workspace, name: &str, args: &Value) -> Option<String> {
             Some(changes.iter().map(|c| diff(&ws.rel(&c.path), &c.old, &c.new)).collect())
         }
         "write_file" => {
-            let path = ws.resolve(s(args, "path")).ok()?;
-            let old = std::fs::read_to_string(&path).unwrap_or_default();
-            Some(diff(&ws.rel(&path), &old, s(args, "content")))
+            let mut out = String::new();
+            for file in write_list(args) {
+                let path = ws.resolve(&file.path).ok()?;
+                let old = std::fs::read_to_string(&path).unwrap_or_default();
+                out.push_str(&diff(&ws.rel(&path), &old, &file.content));
+            }
+            Some(out)
         }
         "bash" => Some(s(args, "command").to_string()),
         _ => None,
@@ -387,7 +402,13 @@ fn replace(text: &str, old: &str, new: &str, replace_all: bool) -> Result<String
         return Ok(if replace_all { text.replace(old, new) } else { text.replacen(old, new, 1) });
     }
     if count > 1 {
-        return Err(format!("old_string matches {count} places; include more surrounding lines or set replace_all"));
+        // Say where, so the model can pick lines that make it unique without reading the file again.
+        let lines: Vec<String> = text.match_indices(old).take(8).map(|(at, _)| (text[..at].matches('\n').count() + 1).to_string()).collect();
+        let more = if count > lines.len() { ", …" } else { "" };
+        return Err(format!(
+            "old_string matches {count} places (lines {}{more}); include more surrounding lines to make it unique, or set replace_all",
+            lines.join(", ")
+        ));
     }
     let lines: Vec<&str> = text.split_inclusive('\n').collect();
     let needle: Vec<&str> = old.trim_matches('\n').lines().map(str::trim_end).collect();
@@ -534,21 +555,49 @@ fn edit_file(ws: &Workspace, args: &Value) -> Result<String, String> {
     Ok(changes.iter().map(|c| diff(&ws.rel(&c.path), &c.old, &c.new)).collect())
 }
 
-fn write_file(ws: &Workspace, args: &Value) -> Result<String, String> {
-    let rel = s(args, "path");
-    let path = ws.resolve(rel)?;
-    check_writable(ws, &ws.rel(&path))?;
-    let old = std::fs::read_to_string(&path).unwrap_or_default();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+/// One file requested of write_file.
+pub struct FileWrite {
+    pub path: String,
+    content: String,
+}
+
+/// The files in a write_file call: the `files` list, or the single path/content form.
+pub fn write_list(args: &Value) -> Vec<FileWrite> {
+    let one = |v: &Value| FileWrite { path: s(v, "path").to_string(), content: s(v, "content").to_string() };
+    match args["files"].as_array().filter(|f| !f.is_empty()) {
+        Some(files) => files.iter().map(one).collect(),
+        None => vec![one(args)],
     }
-    let content = s(args, "content");
-    std::fs::write(&path, content).map_err(|e| e.to_string())?;
-    Ok(if old.is_empty() {
-        format!("Created {} ({} lines)", ws.rel(&path), content.lines().count())
-    } else {
-        diff(&ws.rel(&path), &old, content)
-    })
+}
+
+/// Write every file, or none: all paths are checked before anything is written.
+fn write_file(ws: &Workspace, args: &Value) -> Result<String, String> {
+    let files = write_list(args);
+    let mut planned = vec![];
+    for (i, file) in files.iter().enumerate() {
+        let which = if files.len() > 1 { format!("File {} of {}: ", i + 1, files.len()) } else { String::new() };
+        let rest = if files.len() > 1 { " No files were written." } else { "" };
+        if file.path.trim().is_empty() {
+            return Err(format!("{which}no path given{rest}"));
+        }
+        let path = ws.resolve(&file.path).map_err(|e| format!("{which}{e}{rest}"))?;
+        check_writable(ws, &ws.rel(&path)).map_err(|e| format!("{which}{e}{rest}"))?;
+        planned.push((path, file));
+    }
+    let mut out = vec![];
+    for (path, file) in planned {
+        let old = std::fs::read_to_string(&path).unwrap_or_default();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(&path, &file.content).map_err(|e| format!("{}: {e}", ws.rel(&path)))?;
+        out.push(if old.is_empty() {
+            format!("Created {} ({} lines)", ws.rel(&path), file.content.lines().count())
+        } else {
+            diff(&ws.rel(&path), &old, &file.content)
+        });
+    }
+    Ok(out.join("\n"))
 }
 
 #[derive(Debug)]
@@ -720,7 +769,7 @@ mod tests {
     fn edit_exact_and_whitespace_tolerant() {
         assert_eq!(apply_edit("a\nb\n", "b", "c", false).unwrap(), "a\nc\n");
         assert_eq!(apply_edit("x = 1   \ny = 2\n", "x = 1\ny = 2\n", "z\n", false).unwrap(), "z\n");
-        assert!(apply_edit("a\na\n", "a", "b", false).unwrap_err().contains("2 places"));
+        assert!(apply_edit("a\na\n", "a", "b", false).unwrap_err().contains("2 places (lines 1, 2)"));
         assert_eq!(apply_edit("a\na\n", "a", "b", true).unwrap(), "b\nb\n");
         assert!(apply_edit("a\n", "zzz", "b", false).is_err());
         assert_eq!(apply_edit("x\ny\n", "y\n", "z", false).unwrap(), "x\nz\n");
