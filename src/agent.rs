@@ -123,6 +123,12 @@ pub async fn ask(tx: &Events, summary: String, preview: Option<String>, always: 
     rx.await.unwrap_or(Decision::No)
 }
 
+/// The host a `web_fetch` call reads from, lowercased; None for a URL that doesn't parse or has no host.
+fn fetch_host(args: &serde_json::Value) -> Option<String> {
+    let url = reqwest::Url::parse(args["url"].as_str()?.trim()).ok()?;
+    url.host_str().map(str::to_ascii_lowercase)
+}
+
 /// The part of a shell command that "always allow" applies to: the program, plus its subcommand
 /// for tools like cargo or git. Commands that chain or redirect are never auto-approved.
 pub fn command_prefix(command: &str) -> Option<String> {
@@ -674,13 +680,17 @@ impl Agent {
         let summary = tools::summary(name, &args);
         let command = args["command"].as_str().unwrap_or("");
         let prefix = (name == "bash").then(|| command_prefix(command)).flatten();
-        let pre_approved = match &prefix {
-            Some(p) => self.always_commands.contains(p),
-            None => name != "bash" && self.always_tools.contains(name),
+        // A fetched URL can carry anything the model has read, so fetches ask first; "always" covers one host.
+        let fetch_key = (name == "web_fetch").then(|| fetch_host(&args)).flatten().map(|h| format!("web_fetch:{h}"));
+        let pre_approved = match (&prefix, &fetch_key) {
+            (Some(p), _) => self.always_commands.contains(p),
+            (_, Some(k)) => self.always_tools.contains(k),
+            _ => !matches!(name, "bash" | "web_fetch") && self.always_tools.contains(name),
         };
-        if tools::mutates(name) && self.mode.get() != Mode::Auto && !pre_approved {
+        if (tools::mutates(name) || name == "web_fetch") && self.mode.get() != Mode::Auto && !pre_approved {
             let always = match name {
                 "bash" => prefix.as_ref().map(|p| format!("`{p}` commands")),
+                "web_fetch" => fetch_key.as_ref().map(|k| format!("fetches from {}", &k["web_fetch:".len()..])),
                 _ => Some("file edits".to_string()),
             };
             match ask(tx, summary.clone(), tools::preview(&self.ws, name, &args), always).await {
@@ -688,7 +698,9 @@ impl Agent {
                 Decision::Always => {
                     if let Some(p) = prefix {
                         self.always_commands.insert(p);
-                    } else if name != "bash" {
+                    } else if let Some(k) = fetch_key {
+                        self.always_tools.insert(k);
+                    } else if !matches!(name, "bash" | "web_fetch") {
                         self.always_tools.extend(["edit_file".to_string(), "write_file".to_string()]);
                     }
                 }

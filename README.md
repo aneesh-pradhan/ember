@@ -186,7 +186,8 @@ ember reads project instructions from `AGENTS.md` or `EMBER.md` in the working d
 - **Images:** mention a screenshot with `@shot.png`, or drag an image file into the terminal. Nemotron Super VL
   describes it (transcribing any text exactly) for the coding model. The agent can also look at images in your
   repo with `view_image`.
-- **Web:** the agent can read pages with `web_fetch`. Set `TAVILY_API_KEY` ([tavily.com](https://tavily.com)) to also
+- **Web:** the agent can read pages with `web_fetch`. Each fetch asks first, since a URL can carry anything the
+  agent has read; "always" applies to that host. Set `TAVILY_API_KEY` ([tavily.com](https://tavily.com)) to also
   give it `web_search`, and to have `web_fetch` use Tavily Extract for cleaner pages.
 - **MCP servers:** add stdio servers to `.ember/mcp.json` (per project) or `~/.config/ember/mcp.json`, in the usual
   format. Each tool call asks for permission (or "always" for that tool). A server runs as a command on your machine,

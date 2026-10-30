@@ -225,6 +225,8 @@ pub fn preview(ws: &Workspace, name: &str, args: &Value) -> Option<String> {
             Some(out)
         }
         "bash" => Some(s(args, "command").to_string()),
+        // The summary shortens long URLs; show the whole one, since that's what leaves the machine.
+        "web_fetch" => Some(s(args, "url").trim().to_string()),
         _ => None,
     }
 }
