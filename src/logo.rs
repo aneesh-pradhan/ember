@@ -52,16 +52,20 @@ fn pixel(c: char) -> Option<Color> {
         'S' => STEEL,                      // ports and feet
         'O' => theme::EMBER,               // antenna tip and status LED
         'Y' => Color::Rgb(255, 210, 160),  // antenna glint
+        'T' => Color::Rgb(120, 180, 255),  // tear or sweat drop (the pinned header's mini mascot)
         _ => return None,
     })
 }
 
 /// Render half-block pixel art: each cell shows a top pixel (foreground of `▀`) and a bottom pixel.
 fn sprite_rows() -> Vec<Vec<Span<'static>>> {
-    SPRITE
-        .chunks(2)
+    half_blocks(&SPRITE)
+}
+
+fn half_blocks<S: AsRef<str>>(rows: &[S]) -> Vec<Vec<Span<'static>>> {
+    rows.chunks(2)
         .map(|pair| {
-            let (top, bottom) = (pair[0], pair[1]);
+            let (top, bottom) = (pair[0].as_ref(), pair[1].as_ref());
             top.chars()
                 .zip(bottom.chars())
                 .map(|(t, b)| match (pixel(t), pixel(b)) {
@@ -133,6 +137,44 @@ pub fn banner(model: &str, cwd: &str) -> Vec<Line<'static>> {
 const FAN_FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
 const STREAM: [&str; 6] = ["⠁", "⠃", "⠇", "⠧", "⠷", "⠿"];
 
+/// The pinned header's mascot: a 12×6-pixel face (three terminal rows) whose eyes, mouth and antenna follow `mood`.
+/// It blinks now and then, its antenna pulses while thinking and flickers while a tool runs.
+pub fn mini_mascot(frame: usize, mood: theme::Mood) -> Vec<Line<'static>> {
+    use theme::Mood;
+    let antenna = match mood {
+        Mood::Thinking if (frame / 5) % 2 == 1 => 'Y',
+        Mood::Busy if (frame / 2) % 2 == 1 => 'D',
+        _ => 'O',
+    };
+    // About every five seconds, for two frames (the screen redraws ten times a second).
+    let blinking = frame % 50 >= 48 && !matches!(mood, Mood::Sad | Mood::Happy);
+    // Bright features on the dark face: at this size dark eyes and mouth vanish.
+    let eye = match mood {
+        _ if blinking => 'k',
+        Mood::Thinking => 'k',
+        Mood::Happy => 'Y',
+        Mood::Sad => 'T',
+        _ => 'W',
+    };
+    let blush = if mood == Mood::Sad { 'K' } else { 'P' };
+    let mouth = match mood {
+        Mood::Happy => "KYYYYK",
+        Mood::Sad | Mood::Sweaty => "KKkkKK",
+        _ => "KKYYKK",
+    };
+    let tear = if mood == Mood::Sad { 'T' } else { blush };
+    let sweat = if mood == Mood::Sweaty { 'T' } else { 'D' };
+    let rows = [
+        format!(".........{antenna}.."),
+        ".DDDDDDDDSD.".to_string(),
+        format!("DK{eye}{eye}KKKK{eye}{eye}K{sweat}"),
+        format!("DK{tear}K{mouth}{blush}KD"),
+        ".DDDDDDDDDD.".to_string(),
+        "GGGGGGGGGGGG".to_string(),
+    ];
+    half_blocks(&rows).into_iter().map(Line::from).collect()
+}
+
 fn fg(c: Color) -> Style {
     Style::default().fg(c)
 }
@@ -168,5 +210,17 @@ mod tests {
         assert!(SPRITE.iter().all(|row| row.chars().count() == 24));
         assert!(SPRITE.iter().flat_map(|r| r.chars()).all(|c| c == '.' || pixel(c).is_some()));
         assert_eq!(sprite_rows().len(), 10);
+    }
+
+    #[test]
+    fn mini_mascot_is_three_rows_of_twelve_for_every_mood() {
+        use theme::Mood;
+        for mood in [Mood::Idle, Mood::Working, Mood::Thinking, Mood::Busy, Mood::Sweaty, Mood::Happy, Mood::Sad] {
+            for frame in 0..60 {
+                let rows = mini_mascot(frame, mood);
+                assert_eq!(rows.len(), 3);
+                assert!(rows.iter().all(|r| r.width() == 12), "{mood:?} frame {frame}");
+            }
+        }
     }
 }
