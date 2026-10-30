@@ -9,7 +9,9 @@ use crate::theme;
 
 pub fn render(text: &str) -> Vec<Line<'static>> {
     let mut r = Renderer::default();
-    for event in Parser::new_ext(text, Options::ENABLE_STRIKETHROUGH) {
+    // TeX math first: the parser would strip the backslashes from `\[`, `\(` and `\,` before we could see them.
+    let text = crate::math::render_math(text);
+    for event in Parser::new_ext(&text, Options::ENABLE_STRIKETHROUGH) {
         r.event(event);
     }
     r.flush();
