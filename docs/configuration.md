@@ -3,6 +3,10 @@
 ember reads settings from environment variables, `~/.config/ember/env`, and a `.env` file in the project you run it
 from. The key is the only required setting for Token Factory.
 
+A project's `.env` can't set `EMBER_BASE_URL`, `NEBIUS_BASE_URL`, `EMBER_TEST_CMD` or `EMBER_LOG`: a cloned repository
+could otherwise send your key and code to another server or pick the command `/fix` runs. Set those in
+`~/.config/ember/env` or the environment.
+
 ## Variables
 
 | Variable | Default |
