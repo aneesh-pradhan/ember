@@ -160,6 +160,25 @@ impl Drop for Worktrees {
     }
 }
 
+/// The worktrees hold only what git tracks at `base`. Fails when the project under `sub` isn't in
+/// that snapshot at all (e.g. it sits untracked inside a repo rooted higher up, like `~`), and
+/// returns the untracked files it would leave out otherwise.
+fn check_snapshot(top: &Path, sub: &Path, base: &str) -> Result<Vec<String>> {
+    let spec = if sub.as_os_str().is_empty() { "." } else { sub.to_str().unwrap_or(".") };
+    if git(top, &["ls-tree", "--name-only", base, "--", spec])?.is_empty() {
+        let here = top.join(sub);
+        bail!(
+            "{} has no committed files in the git repository at {}, and /fix works on a snapshot of committed code. \
+             Commit the project there, or make it its own repository (`git init` in {})",
+            here.display(),
+            top.display(),
+            here.display()
+        );
+    }
+    let untracked = git(top, &["ls-files", "--others", "--exclude-standard", "--", spec])?;
+    Ok(untracked.lines().map(str::to_string).collect())
+}
+
 fn git(dir: &Path, args: &[&str]) -> Result<String> {
     let out = std::process::Command::new("git").args(args).current_dir(dir).output()?;
     if !out.status.success() {
@@ -229,6 +248,12 @@ pub async fn run(client: Client, config: Config, cwd: PathBuf, input: String, au
         s if s.is_empty() => git(&top, &["rev-parse", "HEAD"])?,
         s => s,
     };
+    let untracked = check_snapshot(&top, &sub, &base)?;
+    if !untracked.is_empty() {
+        let shown = untracked.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
+        let more = if untracked.len() > 5 { format!(" and {} more", untracked.len() - 5) } else { String::new() };
+        ctx.send(FixEvent::Note(format!("Untracked files aren't copied into the worktrees, so /fix can't see them: {shown}{more}. Commit or `git add` them if the fix needs them.")));
+    }
 
     if !auto {
         let summary = format!("Let /fix run `{test_cmd}` and model-written tests in temporary git worktrees");
@@ -795,5 +820,32 @@ mod tests {
         assert_eq!(detect(&["Cargo.toml", "tests/runtests.py"]).as_deref(), Some("cargo test --quiet"));
         assert_eq!(detect(&["README.md"]), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refuses_projects_missing_from_the_snapshot() {
+        // A repo rooted above the project (like an accidental `git init` in ~) that never committed it.
+        let top = std::env::temp_dir().join(format!("ember-snapshot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&top);
+        let sub = Path::new("recipes/cookbook");
+        std::fs::create_dir_all(top.join(sub).join("src")).unwrap();
+        std::fs::write(top.join("README.md"), "home\n").unwrap();
+        std::fs::write(top.join(sub).join("Cargo.toml"), "").unwrap();
+        let commit = |files: &[&str]| {
+            git(&top, &[&["add", "--"][..], files].concat()).unwrap();
+            git(&top, &["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "commit", "-qm", "c"]).unwrap();
+            git(&top, &["rev-parse", "HEAD"]).unwrap()
+        };
+        git(&top, &["init", "-q"]).unwrap();
+
+        let base = commit(&["README.md"]);
+        let err = check_snapshot(&top, sub, &base).unwrap_err().to_string();
+        assert!(err.contains("no committed files"), "{err}");
+
+        let base = commit(&["recipes/cookbook/Cargo.toml"]);
+        std::fs::write(top.join(sub).join("src/main.rs"), "").unwrap();
+        assert_eq!(check_snapshot(&top, sub, &base).unwrap(), vec!["recipes/cookbook/src/main.rs"]);
+        assert_eq!(check_snapshot(&top, Path::new(""), &base).unwrap(), vec!["recipes/cookbook/src/main.rs"]);
+        let _ = std::fs::remove_dir_all(&top);
     }
 }
