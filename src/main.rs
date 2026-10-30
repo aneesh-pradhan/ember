@@ -95,6 +95,7 @@ async fn main() -> Result<()> {
         config.coder = Tier::parse(m).map_or(m.clone(), |t| config.model(t).to_string());
     }
     let cwd = std::env::current_dir()?;
+    std::thread::spawn(session::prune);
     let think = match cli.think.as_deref().or(std::env::var("EMBER_THINK").ok().as_deref()) {
         Some(t) => crate::llm::Think::parse(t).ok_or_else(|| anyhow::anyhow!("--think must be on, low or off"))?,
         None => crate::llm::Think::On,

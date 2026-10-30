@@ -172,7 +172,7 @@ automatically, so you can pick them up later.
 | `/model [nano\|super\|ultra\|id]` | Show or switch the model; `/models` lists those on your key |
 | `/think [on\|low\|off]` | Set how much Nemotron reasons before acting |
 | `/theme [kawaii\|classic]` | Switch the look: pastel kawaii with sparkles and a moody mascot (default), or the original classic orange |
-| `/resume [n]` | List saved conversations in this directory, or continue one |
+| `/resume [n]` | List saved conversations in this directory, or continue one. Conversations untouched for 30 days are deleted; set `EMBER_SESSION_DAYS` to change that (`0` keeps them) |
 | `/compact` | Summarize the conversation so far to free up context |
 | `/mcp [trust]` | Show MCP servers and their tools. `/mcp trust` starts the servers in this project's `.ember/mcp.json` |
 | `/diff`, `/todos`, `/usage` | Uncommitted changes; task list; token usage per model, including prompt-cache hits |
