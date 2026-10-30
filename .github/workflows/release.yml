@@ -37,6 +37,20 @@ jobs:
           cp target/${{ matrix.target }}/release/ember README.md LICENSE "$name"/
           tar czf "$name.tar.gz" "$name"
           shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ember-${{ matrix.target }}
+          path: ember-*.tar.gz*
+
+  # One job publishes everything: when each build job published its own files, every one of them added another
+  # copy of the generated release notes.
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
           files: |
