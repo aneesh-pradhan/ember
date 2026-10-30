@@ -308,3 +308,27 @@ async fn warns_before_the_step_limit_and_stops_at_it() {
     }
     assert!(events.iter().any(|e| matches!(e, AgentEvent::Notice(n) if n.starts_with("Stopped after 7 steps"))));
 }
+
+/// A fetch can send out anything the model has read, so it asks first. "Always" covers that host only.
+#[tokio::test]
+async fn web_fetch_asks_per_host() {
+    let dir = project(&[]);
+    // Port 1 refuses connections, so approved fetches fail fast without touching the network.
+    let fetch = |url: &str| call("web_fetch", json!({"url": url}));
+    let model = MockModel::start(vec![
+        Reply::Tools(vec![fetch("http://127.0.0.1:1/a?q=secret")]), Reply::Text("declined"),
+        Reply::Tools(vec![fetch("http://127.0.0.1:1/a")]), Reply::Text("fetched"),
+        Reply::Tools(vec![fetch("http://127.0.0.1:1/b"), fetch("http://LOCALHOST:1/c")]), Reply::Text("done"),
+    ])
+    .await;
+    let mut a = agent(&model, &dir, Mode::Ask);
+
+    assert_eq!(approvals(&turn(&mut a, "look it up", Decision::No).await), ["Fetch http://127.0.0.1:1/a?q=secret"]);
+    assert!(tool_results(&model.requests()[1])[0].contains("declined"), "nothing was fetched");
+
+    assert_eq!(approvals(&turn(&mut a, "try again", Decision::Always).await), ["Fetch http://127.0.0.1:1/a"]);
+    assert!(a.allowed().tools.contains("web_fetch:127.0.0.1"));
+    assert!(!a.allowed().tools.contains("edit_file"), "a fetch approval doesn't allow edits");
+
+    assert_eq!(approvals(&turn(&mut a, "and more", Decision::Yes).await), ["Fetch http://LOCALHOST:1/c"], "same host runs");
+}
