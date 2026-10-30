@@ -54,7 +54,7 @@ const COMMANDS: &[(&str, &str, bool)] = &[
     ("think", "set Nemotron's reasoning for the agent: on, low or off", true),
     ("theme", "switch ember's look: kawaii (pastel, sparkles, kaomoji) or classic", true),
     ("animation", "turn ember's small animations on or off: /animation on, /animation off", true),
-    ("mcp", "show connected MCP servers and their tools", false),
+    ("mcp", "show MCP servers and their tools; /mcp trust starts the ones in this project's .ember/mcp.json", true),
     ("usage", "token usage per model this session", false),
     ("permissions", "what runs without asking; /permissions save keeps it for this project, /permissions forget clears it", true),
     ("help", "show commands and keys", false),
@@ -202,6 +202,7 @@ pub async fn run(
         let _ = crossterm::execute!(stdout(), EnableMouseCapture);
     }
     app.print_header();
+    app.print_untrusted_mcp();
     if resume_last {
         app.resume("1");
     }
@@ -287,6 +288,70 @@ impl App {
 
     fn print_notice(&mut self, text: impl Into<String>) {
         self.print_line(notice(text));
+    }
+
+    /// `/mcp`: show the servers and their tools; `trust` starts the project's own servers and remembers that choice.
+    fn mcp(&mut self, arg: &str) {
+        if !matches!(arg, "" | "trust") {
+            self.print_notice("Use /mcp or /mcp trust.");
+            return;
+        }
+        let agent = self.agent.clone();
+        let Ok(agent) = agent.try_lock() else {
+            self.print_notice("ember is busy; try /mcp again in a moment");
+            return;
+        };
+        if arg == "trust" {
+            let untrusted = crate::mcp::untrusted(&self.cwd);
+            if untrusted.is_empty() {
+                self.print_notice("Nothing to trust: this project's MCP servers are already trusted, or it has none.");
+                return;
+            }
+            match crate::mcp::trust(&self.cwd) {
+                Ok(servers) => {
+                    let (mcp, cwd) = (agent.mcp.clone(), self.cwd.clone());
+                    tokio::spawn(async move { mcp.start_servers(servers, &cwd).await });
+                    let names: Vec<_> = untrusted.into_iter().map(|(name, _)| name).collect();
+                    self.print_notice(format!("Trusted .ember/mcp.json; starting {}. /mcp shows them.", names.join(", ")));
+                    self.print_notice("ember will ask again if the file changes.");
+                }
+                Err(e) => self.print_line(Line::styled(format!("  Couldn't trust .ember/mcp.json: {e:#}"), theme::err())),
+            }
+            return;
+        }
+        let status = agent.mcp.status();
+        let tools: Vec<String> = agent.mcp.specs().into_iter().map(|t| t.function.name).collect();
+        drop(agent);
+        if status.is_empty() {
+            self.print_notice("No MCP servers configured. Add them to .ember/mcp.json or ~/.config/ember/mcp.json:");
+            self.print_notice(r#"  {"mcpServers": {"name": {"command": "npx", "args": ["-y", "some-mcp-server"]}}}"#);
+            return;
+        }
+        self.print_line(Line::default());
+        for line in status {
+            let style = match line.chars().next() {
+                Some('✓') => theme::ok(),
+                Some('✗') => theme::err(),
+                _ => theme::dim(),
+            };
+            self.print_line(Line::styled(format!("  {line}"), style));
+        }
+        for t in tools {
+            self.print_notice(format!("    {t}"));
+        }
+    }
+
+    /// At startup: say which of the project's MCP servers were held back, and what they would run.
+    fn print_untrusted_mcp(&mut self) {
+        let untrusted = crate::mcp::untrusted(&self.cwd);
+        if untrusted.is_empty() {
+            return;
+        }
+        self.print_notice("This project's .ember/mcp.json lists MCP servers, which run as commands on your machine:");
+        for (name, command) in untrusted {
+            self.print_notice(format!("  {name}: {command}"));
+        }
+        self.print_notice("They weren't started. If you trust this repository, run /mcp trust.");
     }
 
     /// `/permissions`: list what runs without asking; `save` keeps it for this project, `forget` clears it.
@@ -886,29 +951,7 @@ impl App {
             "todos" => self.print_todos(),
             "diff" => self.print_git_diff(),
             "resume" => self.resume(arg),
-            "mcp" => {
-                let agent = self.agent.clone();
-                let Ok(agent) = agent.try_lock() else {
-                    self.print_notice("ember is busy; try /mcp again in a moment");
-                    return;
-                };
-                let status = agent.mcp.status();
-                let tools: Vec<String> = agent.mcp.specs().into_iter().map(|t| t.function.name).collect();
-                drop(agent);
-                if status.is_empty() {
-                    self.print_notice("No MCP servers configured. Add them to .ember/mcp.json or ~/.config/ember/mcp.json:");
-                    self.print_notice(r#"  {"mcpServers": {"name": {"command": "npx", "args": ["-y", "some-mcp-server"]}}}"#);
-                    return;
-                }
-                self.print_line(Line::default());
-                for line in status {
-                    let style = if line.starts_with('✓') { theme::ok() } else { theme::err() };
-                    self.print_line(Line::styled(format!("  {line}"), style));
-                }
-                for t in tools {
-                    self.print_notice(format!("    {t}"));
-                }
-            }
+            "mcp" => self.mcp(arg),
             "review" => {
                 if self.busy() {
                     return;

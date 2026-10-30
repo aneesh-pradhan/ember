@@ -1,16 +1,18 @@
 //! A Model Context Protocol client for stdio servers, configured like other MCP clients:
 //! `{"mcpServers": {"name": {"command": "...", "args": [...], "env": {...}}}}` in
-//! `.ember/mcp.json` (project) or `~/.config/ember/mcp.json` (everywhere).
+//! `.ember/mcp.json` (project) or `~/.config/ember/mcp.json` (everywhere). A project's servers only start once the user
+//! trusts that exact configuration with `/mcp trust`.
 
-use std::collections::HashMap;
-use std::path::Path;
+use std::collections::{BTreeMap, HashMap};
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
@@ -133,34 +135,126 @@ impl Server {
 pub struct Mcp {
     servers: Mutex<HashMap<String, Arc<Server>>>,
     tools: Mutex<Vec<Tool>>,
-    /// One line per configured server, for /mcp.
-    status: Mutex<Vec<String>>,
+    /// One line per configured server, by name, for /mcp.
+    status: Mutex<BTreeMap<String, String>>,
 }
 
-fn read_configs(cwd: &Path) -> Vec<(String, ServerConfig)> {
-    let mut found: HashMap<String, ServerConfig> = HashMap::new();
-    let global = crate::config::user_env_file().and_then(|f| f.parent().map(|d| d.join("mcp.json")));
-    for path in [global, Some(cwd.join(".ember").join("mcp.json"))].into_iter().flatten() {
-        let Ok(text) = std::fs::read_to_string(&path) else { continue };
-        let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
-        if let Ok(servers) = serde_json::from_value::<HashMap<String, ServerConfig>>(v["mcpServers"].clone()) {
-            found.extend(servers);
-        }
+/// A file's `mcpServers` object; null when the file is missing or isn't JSON.
+fn read_servers(path: &Path) -> Value {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    serde_json::from_str::<Value>(&text).map(|v| v["mcpServers"].clone()).unwrap_or(Value::Null)
+}
+
+fn parse(servers: &Value) -> HashMap<String, ServerConfig> {
+    serde_json::from_value(servers.clone()).unwrap_or_default()
+}
+
+fn config_dir() -> Option<PathBuf> {
+    crate::config::user_env_file()?.parent().map(Path::to_path_buf)
+}
+
+/// `mcp-trust.json` in ember's config directory: for each project, the `mcpServers` the user trusted with `/mcp trust`.
+fn trust_file(config: &Path) -> PathBuf {
+    config.join("mcp-trust.json")
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct Trusted {
+    #[serde(default)]
+    projects: BTreeMap<String, Value>,
+}
+
+/// Whether `file` trusts exactly these servers for the project at `root`. Any change to them needs `/mcp trust` again.
+fn is_trusted(file: &Path, root: &Path, servers: &Value) -> bool {
+    let text = std::fs::read_to_string(file).unwrap_or_default();
+    let trusted: Trusted = serde_json::from_str(&text).unwrap_or_default();
+    trusted.projects.get(&crate::permissions::key(root)) == Some(servers)
+}
+
+fn save_trust(file: &Path, root: &Path, servers: &Value) -> Result<()> {
+    // Refuse to overwrite a hand-edited file that no longer parses: it holds other projects' entries too.
+    let mut trusted: Trusted = match std::fs::read_to_string(file) {
+        Ok(text) => serde_json::from_str(&text).with_context(|| format!("{} isn't valid JSON; fix or delete it", file.display()))?,
+        Err(_) => Trusted::default(),
+    };
+    trusted.projects.insert(crate::permissions::key(root), servers.clone());
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir)?;
     }
-    let mut list: Vec<_> = found.into_iter().collect();
-    list.sort_by(|a, b| a.0.cmp(&b.0));
+    std::fs::write(file, serde_json::to_string_pretty(&trusted)? + "\n").with_context(|| format!("writing {}", file.display()))?;
+    // The servers' env can hold tokens.
+    std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+/// The project's `.ember/mcp.json` servers, and whether the user trusted them. A cloned repository must not be able to
+/// start its own commands just because ember was opened in it.
+fn project_servers(config: Option<&Path>, cwd: &Path) -> (Value, bool) {
+    let servers = read_servers(&cwd.join(".ember").join("mcp.json"));
+    let trusted = parse(&servers).is_empty() || config.is_some_and(|dir| is_trusted(&trust_file(dir), cwd, &servers));
+    (servers, trusted)
+}
+
+/// The project's MCP servers that won't start until `/mcp trust`, as (name, command line).
+pub fn untrusted(cwd: &Path) -> Vec<(String, String)> {
+    let (servers, trusted) = project_servers(config_dir().as_deref(), cwd);
+    if trusted {
+        return vec![];
+    }
+    let mut list: Vec<_> = parse(&servers).into_iter().map(|(name, c)| (name, [vec![c.command], c.args].concat().join(" "))).collect();
+    list.sort();
     list
 }
 
+/// Trust the project's current `.ember/mcp.json` and return its servers, for `Mcp::start_servers`.
+pub fn trust(cwd: &Path) -> Result<Value> {
+    let config = config_dir().context("couldn't find a config directory")?;
+    let (servers, _) = project_servers(Some(&config), cwd);
+    if parse(&servers).is_empty() {
+        bail!("this project has no MCP servers in .ember/mcp.json");
+    }
+    save_trust(&trust_file(&config), cwd, &servers)?;
+    Ok(servers)
+}
+
 impl Mcp {
-    /// Start every configured server and collect its tools. Failures are recorded in the status, not fatal.
+    /// Start the user's servers and the project's trusted ones, and collect their tools. Failures are recorded in the
+    /// status, not fatal.
     pub async fn start(self: Arc<Self>, cwd: &Path) {
-        for (name, config) in read_configs(cwd) {
+        self.start_in(config_dir().as_deref(), cwd).await;
+    }
+
+    /// `start`, with ember's config directory (user servers and trust) passed in.
+    async fn start_in(&self, config: Option<&Path>, cwd: &Path) {
+        let mut configs = parse(&config.map_or(Value::Null, |dir| read_servers(&dir.join("mcp.json"))));
+        let (project, trusted) = project_servers(config, cwd);
+        for (name, server) in parse(&project) {
+            if trusted {
+                configs.insert(name, server);
+            } else if !configs.contains_key(&name) {
+                let line = format!("· {name}: not started; this project's .ember/mcp.json isn't trusted yet (/mcp trust)");
+                self.status.lock().unwrap().insert(name, line);
+            }
+        }
+        self.connect_all(configs, cwd).await;
+    }
+
+    /// Start servers from `servers` (an `mcpServers` object) that aren't running yet, e.g. after `/mcp trust`.
+    pub async fn start_servers(self: Arc<Self>, servers: Value, cwd: &Path) {
+        let mut configs = parse(&servers);
+        configs.retain(|name, _| !self.servers.lock().unwrap().contains_key(name));
+        self.connect_all(configs, cwd).await;
+    }
+
+    async fn connect_all(&self, configs: HashMap<String, ServerConfig>, cwd: &Path) {
+        let mut configs: Vec<_> = configs.into_iter().collect();
+        configs.sort_by(|a, b| a.0.cmp(&b.0));
+        for (name, config) in configs {
             let line = match self.connect(&name, &config, cwd).await {
                 Ok(count) => format!("✓ {name}: {count} tools"),
                 Err(e) => format!("✗ {name}: {e:#}"),
             };
-            self.status.lock().unwrap().push(line);
+            self.status.lock().unwrap().insert(name, line);
         }
     }
 
@@ -208,7 +302,7 @@ impl Mcp {
     }
 
     pub fn status(&self) -> Vec<String> {
-        self.status.lock().unwrap().clone()
+        self.status.lock().unwrap().values().cloned().collect()
     }
 
     pub async fn call(&self, qualified: &str, args: Value) -> Result<String> {
@@ -237,5 +331,46 @@ impl Mcp {
             bail!("{}", out.trim());
         }
         Ok(crate::tools::truncate(out.trim(), 30_000))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn project_servers_start_only_once_trusted() {
+        let dir = std::env::temp_dir().join(format!("ember-mcp-trust-{}", std::process::id()));
+        let (config, project) = (dir.join("config"), dir.join("project"));
+        std::fs::create_dir_all(project.join(".ember")).unwrap();
+        let marker = dir.join("started");
+        let write_config = |args: &str| {
+            let servers = json!({"mcpServers": {"evil": {"command": "sh", "args": ["-c", args]}}});
+            std::fs::write(project.join(".ember/mcp.json"), servers.to_string()).unwrap();
+        };
+        write_config(&format!("touch {}", marker.display()));
+
+        let mcp = Mcp::default();
+        mcp.start_in(Some(&config), &project).await;
+        assert!(!marker.exists(), "an untrusted project server must not run");
+        assert!(mcp.status()[0].contains("isn't trusted yet"), "{:?}", mcp.status());
+        assert!(!project_servers(Some(&config), &project).1);
+
+        let (servers, _) = project_servers(Some(&config), &project);
+        save_trust(&trust_file(&config), &project, &servers).unwrap();
+        assert!(project_servers(Some(&config), &project).1, "trusted");
+        assert!(project_servers(Some(&config), &project.join(".")).1, "keyed by the canonical path");
+        let mode = std::fs::metadata(trust_file(&config)).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "the servers' env can hold tokens");
+        Mcp::default().start_in(Some(&config), &project).await;
+        assert!(marker.exists(), "a trusted server starts");
+
+        write_config("echo changed");
+        assert!(!project_servers(Some(&config), &project).1, "any change needs /mcp trust again");
+
+        std::fs::write(trust_file(&config), "not json").unwrap();
+        assert!(!project_servers(Some(&config), &project).1, "an unreadable trust file trusts nothing");
+        assert!(save_trust(&trust_file(&config), &project, &servers).is_err(), "and isn't overwritten");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
