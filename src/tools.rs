@@ -620,7 +620,55 @@ impl CommandOutput {
         } else {
             format!("exit code {}", self.code.map_or("?".into(), |c| c.to_string()))
         };
-        format!("{}\n[{status}]", truncate(self.output.trim_end(), MAX_OUTPUT))
+        // Already capped while reading (see `Capture`).
+        format!("{}\n[{status}]", self.output.trim_end())
+    }
+}
+
+/// A command's output, kept to the first and last parts while it's read, so a command that prints without end
+/// (`yes`, a chatty server, a huge log) can't fill memory. The result is what `truncate` would make of the whole
+/// output: the first two thirds of `MAX_OUTPUT`, a note of how much was left out, and the last third.
+#[derive(Default)]
+struct Capture {
+    head: Vec<u8>,
+    tail: std::collections::VecDeque<u8>,
+    omitted: usize,
+}
+
+impl Capture {
+    const HEAD: usize = MAX_OUTPUT * 2 / 3;
+    const TAIL: usize = MAX_OUTPUT - Self::HEAD;
+
+    fn push(&mut self, bytes: &[u8]) {
+        let n = (Self::HEAD - self.head.len()).min(bytes.len());
+        self.head.extend_from_slice(&bytes[..n]);
+        self.tail.extend(&bytes[n..]);
+        let excess = self.tail.len().saturating_sub(Self::TAIL);
+        self.tail.drain(..excess);
+        self.omitted += excess;
+    }
+
+    fn text(&self) -> String {
+        let mut tail: Vec<u8> = self.tail.iter().copied().collect();
+        if self.omitted == 0 {
+            let mut all = self.head.clone();
+            all.append(&mut tail);
+            return String::from_utf8_lossy(&all).into_owned();
+        }
+        // Cut both parts at character boundaries rather than show a broken character at the gap.
+        let mut head = &self.head[..];
+        if let Err(e) = std::str::from_utf8(head) {
+            if e.error_len().is_none() {
+                head = &head[..e.valid_up_to()];
+            }
+        }
+        let start = tail.iter().take(3).take_while(|&&b| b & 0xC0 == 0x80).count();
+        let omitted = self.omitted + (self.head.len() - head.len()) + start;
+        format!(
+            "{}\n\n... ({omitted} bytes omitted) ...\n\n{}",
+            String::from_utf8_lossy(head),
+            String::from_utf8_lossy(&tail[start..])
+        )
     }
 }
 
@@ -645,7 +693,7 @@ pub async fn run_command(dir: &Path, command: &str, timeout: Duration) -> Comman
     };
     let mut group = ProcessGroup(child.id());
     let mut stdout = child.stdout.take().expect("piped stdout");
-    let mut buf = Vec::new();
+    let mut buf = Capture::default();
     let result = tokio::time::timeout(timeout, async {
         let mut reading = std::pin::pin!(read_all(&mut stdout, &mut buf));
         tokio::select! {
@@ -663,23 +711,23 @@ pub async fn run_command(dir: &Path, command: &str, timeout: Duration) -> Comman
             group.0 = None;
             CommandOutput {
                 code: status.ok().and_then(|s| s.code()),
-                output: String::from_utf8_lossy(&buf).into_owned(),
+                output: buf.text(),
                 timed_out: false,
             }
         }
         Err(_) => {
             drop(group);
             let _ = child.kill().await;
-            CommandOutput { code: None, output: String::from_utf8_lossy(&buf).into_owned(), timed_out: true }
+            CommandOutput { code: None, output: buf.text(), timed_out: true }
         }
     }
 }
 
 /// Read until end of file. Cancel-safe: `buf` keeps everything read before the future is dropped.
-async fn read_all(stdout: &mut tokio::process::ChildStdout, buf: &mut Vec<u8>) {
+async fn read_all(stdout: &mut tokio::process::ChildStdout, buf: &mut Capture) {
     let mut chunk = [0u8; 8192];
     while let Ok(n @ 1..) = stdout.read(&mut chunk).await {
-        buf.extend_from_slice(&chunk[..n]);
+        buf.push(&chunk[..n]);
     }
 }
 
@@ -756,6 +804,31 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Endless output is capped while it's read, keeping the start and end like `truncate` does.
+    #[tokio::test]
+    async fn command_output_is_capped_while_reading() {
+        let out = run_command(&std::env::temp_dir(), "yes 'é line'", Duration::from_secs(2)).await;
+        assert!(out.timed_out);
+        assert!(out.output.len() < MAX_OUTPUT + 100, "kept {} bytes", out.output.len());
+        assert!(out.output.starts_with("é line\n") && out.output.contains(" bytes omitted) ..."));
+
+        let whole: String = (0..5000).map(|i| format!("{i} é\n")).collect();
+        let mut capture = Capture::default();
+        for chunk in whole.as_bytes().chunks(777) {
+            capture.push(chunk);
+        }
+        // The whole output's start and end, cut at character boundaries, with the gap counted exactly.
+        let text = capture.text();
+        let (head, rest) = text.split_once("\n\n... (").unwrap();
+        let (omitted, tail) = rest.split_once(" bytes omitted) ...\n\n").unwrap();
+        assert!(whole.starts_with(head) && whole.ends_with(tail));
+        assert!(head.len() > Capture::HEAD - 4 && tail.len() > Capture::TAIL - 4);
+        assert_eq!(head.len() + omitted.parse::<usize>().unwrap() + tail.len(), whole.len());
+        let mut small = Capture::default();
+        small.push("short é".as_bytes());
+        assert_eq!(small.text(), "short é");
     }
 
     #[tokio::test]
