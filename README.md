@@ -28,7 +28,7 @@ scrollback, so you can scroll, search, and copy it like any other output.
 - [Install](#install)
 - [Use](#use)
 - [Configuration](docs/configuration.md) and [running on your own hardware](docs/configuration.md#run-nemotron-on-your-own-hardware)
-- [Design](#design)
+- [Design](#design) and [animations](docs/animations.md)
 
 ## `/fix`: a bug proven before it's fixed
 
@@ -53,6 +53,15 @@ scrollback, so you can scroll, search, and copy it like any other output.
 Your working tree is never touched until you approve. Uncommitted changes are included in the experiment through
 `git stash create`, which snapshots them without modifying anything.
 
+Reproduce-first repair isn't new: Agentless and SWE-agent write reproduction scripts, and best-of-N patching is
+common. What `/fix` adds is the checking around it. A separate, cheaper model judges whether the failing test
+fails *for the reported reason*; tests are read-only inside every branch, so no candidate can pass by editing the
+test; regressions are measured against a baseline run of the suite rather than assumed; and all of it happens
+locally, in your repository, behind your approval.
+
+`/fix` works with projects whose tests run under cargo (crates with a library target), Go, pytest, Django's
+`runtests.py`, SymPy's `bin/test` or `npm test`; set `EMBER_TEST_CMD` for anything else.
+
 ## How it uses Nemotron on Nebius Token Factory
 
 Every model call goes to Token Factory's OpenAI-compatible API, with streaming and native tool calling.
@@ -63,6 +72,7 @@ ember routes each kind of work to the smallest Nemotron model that does it well:
 | **Nano** | `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B` | `/fix` judgements: does this failing test really reproduce the bug? did the suite regress? |
 | **Super** | `nvidia/nemotron-3-super-120b-a12b` | The interactive agent; `/fix` investigation, test writing, and every branch's patching loop |
 | **Ultra** | `nvidia/Nemotron-3-Ultra-550b-a55b` | `/fix` strategy planning and choosing between passing candidates; `/review` |
+| **Lightning** | `nvidia/Nemotron-3_5-Lightning` | Drafting commit messages and `/compact` summaries: as good as Super there, about 5x cheaper |
 | **Super VL** | `nvidia/Nemotron-3.5-Super-VL` | ember's eyes: reads screenshots and diagrams you attach, and images the agent opens with `view_image` |
 
 Switch the interactive model at any time with `/model nano|super|ultra` (or any model id from `/models`), and its
@@ -73,6 +83,14 @@ ember is tuned for these models on Token Factory: it turns reasoning off for mec
 reads into single tool calls, keeps the prompt prefix stable so repeat requests hit the cache, and sends Super's
 reasoning back between steps of a task. On ember's coding benchmark, Super with kept reasoning passed 14 of 15
 runs at 8.7 s and $0.0034 per task. The measurements and benchmark are in [docs/tuning.md](docs/tuning.md).
+
+On **SWE-bench Verified**, ember's agent with Super resolved 14, 12 and 15 of a fixed 20-instance sample in three
+runs (41 of 60, 68%) at about **$0.063 per resolved task**, graded by the official harness. That sample is small,
+it's the plain agent rather than `/fix`, and it's the set the harness was tuned on; the held-out set hasn't been
+run yet. Method and caveats are in [docs/tuning.md](docs/tuning.md#swe-bench-verified-and-the-tuning-loop).
+
+Token Factory is the only Nebius service ember uses today. Running `/fix` branches in Nebius Sandboxes, instead of
+local worktrees, is the next step for isolating model-written code.
 
 ## Install
 
@@ -230,27 +248,6 @@ EMBER_TEST_CMD="uvx pytest -q" ember
 /fix Invoice totals are a cent short: 2.50 with 5% tax gives tax 0.12, should be 0.13
 ```
 
-## Animations
-
-ember has a few small motions. They're cosmetic and don't change what the agent does:
-
-- **Startup:** the banner's sparkles twinkle once, for about a second, then hold still.
-- **Mascot:** at an idle prompt, the kawaii mascot's eyes blink every 2.5 to 4 seconds.
-- **Working:** a sparkle spinner sits beside the status line, and the line names the step ember is on, such as "Reading files…" or "Running tests…".
-- **Fix verified:** a short burst of sparkles, about half a second, when `/fix` produces a passing fix.
-- **Errors:** the status line flashes the error color once.
-
-Turn them off with `/animation off`, and back on with `/animation on`. The choice is saved to `~/.config/ember/config.toml`, which also takes these settings:
-
-```toml
-[animation]
-enabled = true
-speed = "normal"     # slow | normal | fast
-mascot_blink = true
-```
-
-Animations stay off when stdout isn't a terminal, when `CI` or `NO_COLOR` is set, or when `EMBER_REDUCED_MOTION=1`. The working spinner that was already there keeps its existing behavior.
-
 ## Design
 
 ```
@@ -261,6 +258,10 @@ src/
   input.rs     multi-line line editor with history
   theme.rs     palette: warm accents on whatever background the terminal has
   agent.rs     agent loop: stream → tool calls → approval → results → repeat; checkpoints for /undo
+  agent/e2e.rs end-to-end tests of the agent loop against a scripted model
+  mock.rs      scripted Token Factory-compatible model server for tests
+  permissions.rs  commands and tools allowed without asking, per project
+  repomap.rs   compact project map for the system prompt
   fix.rs       /fix pipeline over git worktrees
   git.rs       /commit, /branch, /pr and git status
   llm.rs       streaming OpenAI-compatible client: SSE, tool-call assembly, <think> splitting, retries
@@ -271,6 +272,8 @@ src/
   commands.rs  custom slash commands
   session.rs   saved conversations for /resume and --continue
   markdown.rs  Markdown rendering and word wrapping for the terminal
+  math.rs      TeX math to plain Unicode
+  animation.rs startup sparkles, mascot blink and other cosmetic motion
   logo.rs      the chibi mascot
 ```
 

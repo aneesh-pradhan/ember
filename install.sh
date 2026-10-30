@@ -4,7 +4,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/aneesh-pradhan/ember/main/install.sh | sh
 #
 # Environment:
-#   EMBER_VERSION      release tag to install (default: latest), e.g. v0.1.1
+#   EMBER_VERSION      release tag to install (default: latest), e.g. v0.9.0
 #   EMBER_INSTALL_DIR  where to put the binary (default: ~/.local/bin)
 set -eu
 
