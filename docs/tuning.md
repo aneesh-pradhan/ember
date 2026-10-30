@@ -83,3 +83,18 @@ held-out set. Harness changes follow the loop NVIDIA and LangChain used to tune 
 3. **Verify before believing.** Rerun the working set under new run ids (the runner resumes per run id) and keep
    a change only if it holds across repeats. At 20 instances, one flip is noise.
 4. **Confirm on the held-out set** once, after choosing a change on the working set.
+
+### Results so far
+
+Super, working set (`verified-20.txt`), current harness, three runs (`control-r1` to `r3`):
+
+| Run | Resolved | Cost | Cost per resolved |
+|---|---|---|---|
+| control-r1 | 14 / 20 | $0.88 | $0.063 |
+| control-r2 | 12 / 20 | $0.83 | $0.069 |
+| control-r3 | 15 / 20 | $0.88 | $0.059 |
+| **Total** | **41 / 60 (68%)** | **$2.59** | **$0.063** |
+
+The spread between identical runs (12 to 15) is why a single run decides nothing. These are the instances the
+harness was tuned on, so they likely overstate it; the held-out set hasn't been run yet. The raw runs stay out of
+git (`bench/swebench/runs/` is ignored) because each holds full agent logs.

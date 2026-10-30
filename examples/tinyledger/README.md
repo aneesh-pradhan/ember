@@ -1,6 +1,6 @@
 # tinyledger
 
-Small invoicing helpers used by FailFirst's demo. Line items, percentage discounts and
+Small invoicing helpers used by ember's `/fix` demo. Line items, percentage discounts and
 sales tax, with amounts reported in dollars rounded to cents.
 
 ```python
