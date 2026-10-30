@@ -174,7 +174,7 @@ automatically, so you can pick them up later.
 | `/theme [kawaii\|classic]` | Switch the look: pastel kawaii with sparkles and a moody mascot (default), or the original classic orange |
 | `/resume [n]` | List saved conversations in this directory, or continue one |
 | `/compact` | Summarize the conversation so far to free up context |
-| `/mcp` | Show connected MCP servers and their tools |
+| `/mcp [trust]` | Show MCP servers and their tools. `/mcp trust` starts the servers in this project's `.ember/mcp.json` |
 | `/diff`, `/todos`, `/usage` | Uncommitted changes; task list; token usage per model, including prompt-cache hits |
 | `/permissions` | What runs without asking. `/permissions save` keeps this session's "always" approvals for the project (stored in `~/.config/ember/permissions.json`, never in the repo); `/permissions forget` clears them |
 | `/clear`, `/quit` | New conversation; exit (or Ctrl+C twice) |
@@ -189,7 +189,9 @@ ember reads project instructions from `AGENTS.md` or `EMBER.md` in the working d
 - **Web:** the agent can read pages with `web_fetch`. Set `TAVILY_API_KEY` ([tavily.com](https://tavily.com)) to also
   give it `web_search`, and to have `web_fetch` use Tavily Extract for cleaner pages.
 - **MCP servers:** add stdio servers to `.ember/mcp.json` (per project) or `~/.config/ember/mcp.json`, in the usual
-  format. Each tool call asks for permission (or "always" for that tool):
+  format. Each tool call asks for permission (or "always" for that tool). A server runs as a command on your machine,
+  so ember won't start a project's servers until you run `/mcp trust` there. It saves the trusted configuration in
+  `~/.config/ember/mcp-trust.json` and asks again whenever the project's file changes:
 
   ```json
   {"mcpServers": {"github": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"],

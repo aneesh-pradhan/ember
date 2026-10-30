@@ -139,6 +139,13 @@ async fn print_mode(config: Config, cwd: std::path::PathBuf, prompt: String, opt
                 None => eprintln!("[resume] no saved conversation in this directory; starting a new one"),
             }
         }
+        let untrusted = crate::mcp::untrusted(&cwd);
+        if !untrusted.is_empty() {
+            eprintln!(
+                "[note] Not starting the MCP servers in .ember/mcp.json ({}): run ember here and use /mcp trust if you trust this repository",
+                untrusted.iter().map(|(name, command)| format!("{name}: {command}")).collect::<Vec<_>>().join("; ")
+            );
+        }
         agent.mcp.clone().start(&cwd).await;
         *agent.think.lock().unwrap() = think;
         tokio::spawn(async move { agent.turn(prompt, &tx).await })
