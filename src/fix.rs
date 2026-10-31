@@ -208,13 +208,33 @@ pub fn detect_test_command(dir: &Path) -> Option<String> {
     }
 }
 
-/// Environment tweaks so tests in a worktree use the worktree's code, not an installed copy.
-fn test_env_prefix(top: &Path, project: &Path) -> String {
-    let mut prefix = String::new();
-    if project.join("Cargo.toml").exists() {
-        // Share one target dir between worktrees so each branch doesn't rebuild from scratch.
-        prefix.push_str(&format!("CARGO_TARGET_DIR='{}' ", top.join("target").join("ember-fix").display()));
+/// The tools /fix offers: no shell, and no web, since the issue text it works from can be attacker-written and
+/// /fix runs these calls without asking.
+fn fix_specs(read_only: bool) -> Vec<ToolSpec> {
+    tools::specs(read_only).into_iter().filter(|s| !matches!(s.function.name.as_str(), "bash" | "web_search" | "web_fetch")).collect()
+}
+
+/// Run a model's tool call, but only if it names a tool this step offered: tools::run dispatches on any name.
+async fn run_offered(ws: &Workspace, specs: &[ToolSpec], call: &ToolCall, args: &Value) -> String {
+    let name = call.function.name.as_str();
+    if !specs.iter().any(|s| s.function.name == name) {
+        return format!("Error: there is no tool named `{name}` here.");
     }
+    tools::run(ws, name, args).await.unwrap_or_else(|e| format!("Error: {e}"))
+}
+
+/// A Rust package with only a binary target: tests in tests/ can't `use` it, so /fix has nowhere to put a repro test.
+fn binary_only_crate(dir: &Path) -> bool {
+    let Ok(manifest) = std::fs::read_to_string(dir.join("Cargo.toml")) else { return false };
+    let has_section = |name: &str| manifest.lines().any(|l| l.trim() == name);
+    !dir.join("src/lib.rs").exists() && !has_section("[lib]") && !has_section("[workspace]")
+}
+
+/// Environment tweaks so tests in a worktree use the worktree's code, not an installed copy.
+/// Each worktree keeps its own Cargo target dir: a shared one lets a branch's tests run another branch's binaries,
+/// because cargo names them the same in every worktree and an older edit looks fresh.
+fn test_env_prefix(project: &Path) -> String {
+    let mut prefix = String::new();
     if detect_test_command(project).is_some_and(|c| c.contains("pytest")) {
         prefix.push_str("PYTHONPATH=\"$PWD/src:$PWD${PYTHONPATH:+:$PYTHONPATH}\" PYTHONDONTWRITEBYTECODE=1 ");
     }
@@ -243,6 +263,12 @@ pub async fn run(client: Client, config: Config, cwd: PathBuf, input: String, au
         .clone()
         .or_else(|| detect_test_command(&cwd))
         .ok_or_else(|| anyhow!("couldn't detect a test command here; set EMBER_TEST_CMD"))?;
+    if ctx.config.test_cmd.is_none() && binary_only_crate(&cwd) {
+        bail!(
+            "/fix can't reproduce bugs in a binary-only Rust crate yet: a new test in tests/ can't import a bin crate, \
+             so no repro test can reach the code. Describe the bug in a normal turn instead, or set EMBER_TEST_CMD"
+        );
+    }
     // `git stash create` snapshots uncommitted tracked changes without touching the working tree.
     let base = match git(&top, &["stash", "create"])? {
         s if s.is_empty() => git(&top, &["rev-parse", "HEAD"])?,
@@ -266,7 +292,7 @@ pub async fn run(client: Client, config: Config, cwd: PathBuf, input: String, au
     let issue = fetch_issue(&input).await?;
     let mut trees = Worktrees::new(&top)?;
     let in_tree = |root: &Path| root.join(&sub);
-    let prefix = test_env_prefix(&top, &cwd);
+    let prefix = test_env_prefix(&cwd);
 
     let baseline_dir = in_tree(&trees.add("baseline", &base)?);
     let baseline_cmd = format!("{prefix}{test_cmd}");
@@ -358,7 +384,7 @@ async fn investigate(ctx: &Ctx, root: &Path, issue: &str) -> Result<Value> {
             "test_conventions": {"type": "string", "description": "Where tests live, how they import the code, how to run one test"}},
             "required": ["root_cause", "locations", "how_to_trigger", "test_conventions"]}),
     );
-    let mut specs = tools::specs(true);
+    let mut specs = fix_specs(true);
     specs.push(report.clone());
     let mut messages = vec![
         Message::system(
@@ -390,7 +416,7 @@ async fn investigate(ctx: &Ctx, root: &Path, issue: &str) -> Result<Value> {
                 return Ok(args);
             }
             ctx.send(FixEvent::Activity(tools::summary(&call.function.name, &args)));
-            let out = tools::run(&ws, &call.function.name, &args).await.unwrap_or_else(|e| format!("Error: {e}"));
+            let out = run_offered(&ws, &specs, call, &args).await;
             messages.push(Message::tool(call.id.clone(), out));
         }
     }
@@ -415,7 +441,7 @@ async fn reproduce(ctx: &Ctx, root: &Path, issue: &str, report: &Value, prefix: 
             "command": {"type": "string", "description": "Shell command, run from the project directory, that runs just this test"}},
             "required": ["path", "content", "command"]}),
     );
-    let mut specs = tools::specs(true);
+    let mut specs = fix_specs(true);
     specs.push(submit);
     let mut messages = vec![
         Message::system(
@@ -453,7 +479,7 @@ async fn reproduce(ctx: &Ctx, root: &Path, issue: &str, report: &Value, prefix: 
             let args = call.args();
             if call.function.name != "submit_test" {
                 ctx.send(FixEvent::Activity(tools::summary(&call.function.name, &args)));
-                let out = tools::run(&ws, &call.function.name, &args).await.unwrap_or_else(|e| format!("Error: {e}"));
+                let out = run_offered(&ws, &specs, call, &args).await;
                 messages.push(Message::tool(call.id.clone(), out));
                 continue;
             }
@@ -614,7 +640,7 @@ impl Branch {
         }
         std::fs::write(&test_path, &self.repro.code)?;
         let ws = Workspace { root: self.root.clone(), protect_tests: true };
-        let mut specs = tools::specs(false).into_iter().filter(|s| s.function.name != "bash").collect::<Vec<_>>();
+        let mut specs = fix_specs(false);
         specs.push(run_tests_spec());
         let mut messages = vec![
             Message::system(
@@ -716,7 +742,7 @@ impl Branch {
                 }
                 let args = call.args();
                 self.status("running", format!("round {round}: {}", tools::summary(&call.function.name, &args)));
-                let out = tools::run(ws, &call.function.name, &args).await.unwrap_or_else(|e| format!("Error: {e}"));
+                let out = run_offered(ws, specs, call, &args).await;
                 messages.push(Message::tool(call.id.clone(), out));
             }
             if run_tests.is_some() {
@@ -819,6 +845,39 @@ mod tests {
         assert_eq!(detect(&["pyproject.toml"]).as_deref(), Some("python -m pytest -q -p no:cacheprovider"));
         assert_eq!(detect(&["Cargo.toml", "tests/runtests.py"]).as_deref(), Some("cargo test --quiet"));
         assert_eq!(detect(&["README.md"]), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn runs_only_the_tools_it_offered() {
+        let dir = std::env::temp_dir().join(format!("ember-offered-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ws = Workspace { root: dir.clone(), protect_tests: true };
+        let specs = fix_specs(false);
+        assert!(!specs.iter().any(|s| ["bash", "web_search", "web_fetch"].contains(&s.function.name.as_str())));
+        let call = |name: &str| ToolCall { id: "c".into(), kind: "function".into(), function: FunctionCall { name: name.into(), arguments: "{}".into() } };
+        let args = json!({"command": "touch pwned"});
+        assert!(run_offered(&ws, &specs, &call("bash"), &args).await.contains("no tool named `bash`"));
+        assert!(!dir.join("pwned").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn spots_binary_only_crates() {
+        let dir = std::env::temp_dir().join(format!("ember-bincrate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        assert!(!binary_only_crate(&dir), "not a Rust project");
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"a\"\n").unwrap();
+        std::fs::write(dir.join("src/main.rs"), "").unwrap();
+        assert!(binary_only_crate(&dir));
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"a\"\n\n[lib]\npath = \"src/core.rs\"\n").unwrap();
+        assert!(!binary_only_crate(&dir));
+        std::fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = [\"a\"]\n").unwrap();
+        assert!(!binary_only_crate(&dir));
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"a\"\n").unwrap();
+        std::fs::write(dir.join("src/lib.rs"), "").unwrap();
+        assert!(!binary_only_crate(&dir));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -50,10 +50,25 @@ pub struct Config {
     pub think_budget: Option<u32>,
 }
 
+/// Settings a cloned repository's .env must not set: where the API key and prompts are sent, which command runs,
+/// and where the log is written. They still work from the user-level file or the real environment.
+const USER_ONLY: [&str; 4] = ["EMBER_BASE_URL", "NEBIUS_BASE_URL", "EMBER_TEST_CMD", "EMBER_LOG"];
+
+fn load_project_env() {
+    let Ok(vars) = dotenvy::dotenv_iter() else { return };
+    for (key, value) in vars.flatten() {
+        if USER_ONLY.contains(&key.as_str()) {
+            eprintln!("ember: ignoring {key} from the project .env; set it in ~/.config/ember/env or the environment");
+        } else if env::var_os(&key).is_none() {
+            env::set_var(key, value);
+        }
+    }
+}
+
 impl Config {
     pub fn load() -> Config {
         // Project .env first, then the user-level file; real env vars win over both.
-        let _ = dotenvy::dotenv();
+        load_project_env();
         // ~/.config/ember/env on every platform; also the platform config dir
         // (~/Library/Application Support/ember/env on macOS) for anyone who put it there.
         let platform = dirs::config_dir().map(|d| d.join("ember").join("env"));
