@@ -742,7 +742,7 @@ impl Branch {
                 }
                 let args = call.args();
                 self.status("running", format!("round {round}: {}", tools::summary(&call.function.name, &args)));
-                let out = run_offered(ws, &specs, call, &args).await;
+                let out = run_offered(ws, specs, call, &args).await;
                 messages.push(Message::tool(call.id.clone(), out));
             }
             if run_tests.is_some() {
