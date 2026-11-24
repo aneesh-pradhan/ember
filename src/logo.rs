@@ -38,21 +38,21 @@ const SPRITE: [&str; 20] = [
 
 fn pixel(c: char) -> Option<Color> {
     Some(match c {
-        'D' => Color::Rgb(84, 46, 130),    // outline
-        'K' => Color::Rgb(140, 90, 206),   // body
-        'k' => Color::Rgb(176, 128, 232),  // body highlight
-        'F' => Color::Rgb(36, 38, 44),     // heatsink fin
-        'f' => Color::Rgb(118, 124, 136),  // fin edge
-        'E' => Color::Rgb(16, 16, 20),     // eye
-        'W' => Color::Rgb(250, 250, 250),  // eye sparkle
-        'P' => Color::Rgb(255, 138, 168),  // blush
-        'M' => Color::Rgb(16, 16, 20),     // smile
-        'G' => BOARD_GREEN,                // circuit board
-        'g' => Color::Rgb(74, 122, 0),     // board edge
-        'S' => STEEL,                      // ports and feet
-        'O' => theme::EMBER,               // antenna tip and status LED
-        'Y' => Color::Rgb(255, 210, 160),  // antenna glint
-        'T' => Color::Rgb(120, 180, 255),  // tear or sweat drop (the pinned header's mini mascot)
+        'D' => Color::Rgb(84, 46, 130),   // outline
+        'K' => Color::Rgb(140, 90, 206),  // body
+        'k' => Color::Rgb(176, 128, 232), // body highlight
+        'F' => Color::Rgb(36, 38, 44),    // heatsink fin
+        'f' => Color::Rgb(118, 124, 136), // fin edge
+        'E' => Color::Rgb(16, 16, 20),    // eye
+        'W' => Color::Rgb(250, 250, 250), // eye sparkle
+        'P' => Color::Rgb(255, 138, 168), // blush
+        'M' => Color::Rgb(16, 16, 20),    // smile
+        'G' => BOARD_GREEN,               // circuit board
+        'g' => Color::Rgb(74, 122, 0),    // board edge
+        'S' => STEEL,                     // ports and feet
+        'O' => theme::EMBER,              // antenna tip and status LED
+        'Y' => Color::Rgb(255, 210, 160), // antenna glint
+        'T' => Color::Rgb(120, 180, 255), // tear or sweat drop (the pinned header's mini mascot)
         _ => return None,
     })
 }

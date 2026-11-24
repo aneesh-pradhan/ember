@@ -1,7 +1,11 @@
 # Configuration
 
 ember reads settings from environment variables, `~/.config/ember/env`, and a `.env` file in the project you run it
-from. The key is the only required setting for Token Factory.
+from. Real environment variables win over both files.
+
+`NEBIUS_API_KEY` is the only required setting for Token Factory. `cargo test`, `ember --help`, and `ember --version`
+do not need it, and the full-screen UI starts without it (it warns, and refuses the model call when you send a
+prompt). A local OpenAI-compatible server needs no Nebius key; set `EMBER_BASE_URL` as below.
 
 ## Variables
 

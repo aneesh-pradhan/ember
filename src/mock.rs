@@ -61,10 +61,9 @@ impl MockModel {
                             let partial = &partial[..partial.find("\n\n").unwrap() + 2];
                             format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 100000\r\n\r\n{partial}")
                         }
-                        ref reply => format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{}",
-                            sse(reply)
-                        ),
+                        ref reply => {
+                            format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{}", sse(reply))
+                        }
                     };
                     let _ = socket.write_all(response.as_bytes()).await;
                     let _ = socket.shutdown().await;
@@ -95,11 +94,7 @@ async fn read_request(socket: &mut tokio::net::TcpStream) -> Option<Value> {
         }
     };
     let headers = String::from_utf8_lossy(&buf[..header_end]).to_ascii_lowercase();
-    let length: usize = headers
-        .lines()
-        .find_map(|l| l.strip_prefix("content-length:"))
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(0);
+    let length: usize = headers.lines().find_map(|l| l.strip_prefix("content-length:")).and_then(|v| v.trim().parse().ok()).unwrap_or(0);
     while buf.len() < header_end + length {
         let n = socket.read(&mut chunk).await.ok()?;
         if n == 0 {

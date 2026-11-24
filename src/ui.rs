@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{
-    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event, EventStream, KeyCode,
-    KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event, EventStream, KeyCode, KeyEvent,
+    KeyEventKind, KeyModifiers, MouseEventKind,
 };
 use futures_util::StreamExt;
 use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
@@ -678,7 +678,9 @@ impl App {
             Some(d) => {
                 let label = match d {
                     Decision::Yes => "approved".to_string(),
-                    Decision::Always => format!("approved; will allow {} for the rest of this session", req.always.as_deref().unwrap_or("this")),
+                    Decision::Always => {
+                        format!("approved; will allow {} for the rest of this session", req.always.as_deref().unwrap_or("this"))
+                    }
                     Decision::No => "declined".to_string(),
                 };
                 self.print_notice(format!("  {label}"));
@@ -903,7 +905,12 @@ impl App {
             let _ = tx.send(AgentEvent::ToolStart { summary: format!("$ {command}") });
             let out = tools::run_command(&cwd, &command, Duration::from_secs(600)).await;
             let rendered = out.render();
-            let _ = tx.send(AgentEvent::ToolDone { name: "bash".into(), summary: format!("$ {command}"), output: rendered.clone(), ok: out.success() });
+            let _ = tx.send(AgentEvent::ToolDone {
+                name: "bash".into(),
+                summary: format!("$ {command}"),
+                output: rendered.clone(),
+                ok: out.success(),
+            });
             agent.lock().await.note_shell(&command, &rendered);
         });
     }
@@ -1235,7 +1242,8 @@ impl App {
         };
         self.motion.set_enabled(on);
         let saved = animation::save_enabled(on).map_or_else(|e| format!(" (couldn't save it: {e})"), |_| String::new());
-        let muted = if on && self.motion.muted() { " (still off in this terminal: CI, NO_COLOR, EMBER_REDUCED_MOTION or no TTY)" } else { "" };
+        let muted =
+            if on && self.motion.muted() { " (still off in this terminal: CI, NO_COLOR, EMBER_REDUCED_MOTION or no TTY)" } else { "" };
         self.print_notice(format!("Animations {}{saved}{muted}", if on { "on" } else { "off" }));
     }
 
@@ -1286,8 +1294,7 @@ impl App {
     /// The session's cost so far at Token Factory list prices, with a `≥` when some calls went to a model whose
     /// price isn't known; None when no call has a known price (another server, or no calls yet).
     fn session_cost(&self) -> Option<String> {
-        let costs: Vec<Option<f64>> =
-            self.usage.iter().map(|(model, (p, c, cached))| self.config.cost(model, *p, *c, *cached)).collect();
+        let costs: Vec<Option<f64>> = self.usage.iter().map(|(model, (p, c, cached))| self.config.cost(model, *p, *c, *cached)).collect();
         let known: f64 = costs.iter().flatten().sum();
         if costs.iter().all(Option::is_none) {
             return None;
@@ -1327,8 +1334,7 @@ impl App {
         }
         let text = self.input.text();
         if let Some(query) = text.strip_prefix('/').filter(|q| !q.contains(char::is_whitespace)) {
-            let mut all: Vec<(String, String)> =
-                COMMANDS.iter().map(|(name, desc, _)| (name.to_string(), desc.to_string())).collect();
+            let mut all: Vec<(String, String)> = COMMANDS.iter().map(|(name, desc, _)| (name.to_string(), desc.to_string())).collect();
             for custom in crate::commands::load(&self.cwd) {
                 if !all.iter().any(|(n, _)| *n == custom.name) {
                     let scope = if custom.project { "project" } else { "custom" };
@@ -1362,8 +1368,7 @@ impl App {
         };
         let footer_height = popup.as_ref().map_or(1, |p| p.items.len().min(8) as u16);
         let [body, prompt, footer] =
-            Layout::vertical([Constraint::Min(3), Constraint::Length(prompt_height), Constraint::Length(footer_height)])
-                .areas(f.area());
+            Layout::vertical([Constraint::Min(3), Constraint::Length(prompt_height), Constraint::Length(footer_height)]).areas(f.area());
 
         self.render_body(f, body);
         if self.approval.is_some() {
@@ -1543,10 +1548,7 @@ impl App {
         block.render(area, f.buffer_mut());
         let options = approval_options(req);
         let sel = self.approval_sel.min(options.len() - 1);
-        let mut lines = vec![
-            Line::styled(format!("{}?", req.summary), theme::bold()),
-            Line::default(),
-        ];
+        let mut lines = vec![Line::styled(format!("{}?", req.summary), theme::bold()), Line::default()];
         for (i, (_, label)) in options.iter().enumerate() {
             let selected = i == sel;
             lines.push(Line::from(vec![
@@ -1566,7 +1568,13 @@ impl App {
         let mut right = vec![];
         if let Some((used, window)) = self.context.filter(|(u, _)| *u > 0) {
             let pct = (used as f64 / window as f64 * 100.0).round() as u64;
-            let style = if pct >= 80 { theme::err() } else if pct >= 50 { theme::code() } else { theme::dim() };
+            let style = if pct >= 80 {
+                theme::err()
+            } else if pct >= 50 {
+                theme::code()
+            } else {
+                theme::dim()
+            };
             right.push(Span::styled(format!("ctx {pct}%  "), style));
         }
         let tokens: u64 = self.usage.values().map(|(p, c, _)| p + c).sum();
@@ -1574,7 +1582,7 @@ impl App {
             right.push(Span::styled(format!("{:.1}k tok  ", tokens as f64 / 1000.0), theme::dim()));
         }
         if let Some(cost) = self.session_cost() {
-            right.push(Span::styled(format!("{}  ", cost), theme::dim()));
+            right.push(Span::styled(format!("{cost}  "), theme::dim()));
         }
         if let Ok(agent) = self.agent.try_lock() {
             let think = *agent.think.lock().unwrap();
@@ -1670,7 +1678,10 @@ impl App {
                 lines.push(Line::from(vec![
                     Span::styled(format!("  {id} "), theme::accent()),
                     Span::styled(format!("{:<9}", status.replace('_', " ")), style),
-                    Span::styled(tools::one_line(if note.is_empty() { title } else { note }, width.saturating_sub(16) as usize), theme::dim()),
+                    Span::styled(
+                        tools::one_line(if note.is_empty() { title } else { note }, width.saturating_sub(16) as usize),
+                        theme::dim(),
+                    ),
                 ]));
             }
             if !view.activity.is_empty() {
@@ -1683,7 +1694,10 @@ impl App {
             lines.extend(markdown::wrap(&markdown::render(&self.live_text), width));
         } else if !self.live_reasoning.is_empty() {
             let last = self.live_reasoning.lines().last().unwrap_or("").to_string();
-            lines.push(Line::styled(format!("  {} {}", theme::glyphs().reasoning, tools::one_line(&last, width as usize - 6)), theme::dim()));
+            lines.push(Line::styled(
+                format!("  {} {}", theme::glyphs().reasoning, tools::one_line(&last, width as usize - 6)),
+                theme::dim(),
+            ));
         }
         if let Some(current) = self.todos.iter().find(|t| t.status == "in_progress") {
             let done = self.todos.iter().filter(|t| t.status == "completed").count();
@@ -1741,10 +1755,8 @@ fn todo_lines(todos: &[Todo]) -> Vec<Line<'static>> {
 }
 
 fn diff_lines(diff: &str, max: usize) -> Vec<Line<'static>> {
-    let lines: Vec<&str> = diff
-        .lines()
-        .filter(|l| !["---", "+++", "index ", "new file mode", "deleted file mode"].iter().any(|p| l.starts_with(p)))
-        .collect();
+    let lines: Vec<&str> =
+        diff.lines().filter(|l| !["---", "+++", "index ", "new file mode", "deleted file mode"].iter().any(|p| l.starts_with(p))).collect();
     let mut out: Vec<Line<'static>> =
         lines.iter().take(max).map(|line| Line::styled(format!("    {line}"), theme::diff_line(line))).collect();
     if lines.len() > max {
@@ -1764,7 +1776,13 @@ fn fuzzy_score(query: &str, candidate: &str) -> Option<i64> {
     let c = candidate.to_lowercase();
     if let Some(pos) = c.find(&q) {
         let name = c.rsplit('/').next().unwrap_or(&c);
-        let bonus = if name.starts_with(&q) { 800 } else if name.contains(&q) { 500 } else { 0 };
+        let bonus = if name.starts_with(&q) {
+            800
+        } else if name.contains(&q) {
+            500
+        } else {
+            0
+        };
         return Some(2000 + bonus - pos as i64 - len);
     }
     let mut chars = c.chars();

@@ -51,10 +51,13 @@ pub async fn search(args: &Value) -> Result<String, String> {
     let query = args["query"].as_str().filter(|q| !q.trim().is_empty()).ok_or("query is required")?;
     let topic = args["topic"].as_str().filter(|t| matches!(*t, "news" | "finance")).unwrap_or("general");
     let max = args["max_results"].as_u64().unwrap_or(5).clamp(1, 10);
-    let v = tavily("search", json!({
-        "query": query, "topic": topic, "max_results": max,
-        "search_depth": "basic", "include_answer": "basic",
-    }))
+    let v = tavily(
+        "search",
+        json!({
+            "query": query, "topic": topic, "max_results": max,
+            "search_depth": "basic", "include_answer": "basic",
+        }),
+    )
     .await?;
     let mut out = String::new();
     if let Some(answer) = v["answer"].as_str().filter(|a| !a.is_empty()) {
@@ -92,23 +95,22 @@ pub async fn fetch(args: &Value) -> Result<String, String> {
     } else {
         let resp = client().get(url).send().await.map_err(|e| format!("request failed: {e}"))?;
         let status = resp.status();
-        let is_html = resp
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|ct| ct.contains("html"));
+        let is_html = resp.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|ct| ct.contains("html"));
         let body = resp.text().await.map_err(|e| format!("could not read body: {e}"))?;
         if !status.is_success() {
             return Err(format!("HTTP {status} for {url}"));
         }
-        if is_html { html_to_text(&body) } else { body }
+        if is_html {
+            html_to_text(&body)
+        } else {
+            body
+        }
     };
     Ok(crate::tools::truncate(text.trim(), MAX_PAGE))
 }
 
 /// A rough HTML-to-text conversion: drop scripts and styles, keep block structure as line breaks.
 pub fn html_to_text(html: &str) -> String {
-
     let blocks = Regex::new(r"(?i)<\s*(br|/p|/div|/h[1-6]|/tr|/section|/article|/pre)\s*/?>").unwrap();
     let items = Regex::new(r"(?i)<\s*li\b[^>]*>").unwrap();
     let tags = Regex::new(r"(?s)<[^>]+>").unwrap();

@@ -52,14 +52,34 @@ pub struct Strategy {
 }
 
 pub enum FixEvent {
-    Stage { name: &'static str, status: Status, detail: String },
+    Stage {
+        name: &'static str,
+        status: Status,
+        detail: String,
+    },
     /// Progress worth showing live but not keeping (e.g. "Read src/lib.rs").
     Activity(String),
     Note(String),
-    Repro { attempt: usize, path: String, code: String, output: String, confirmed: bool, reason: String },
+    Repro {
+        attempt: usize,
+        path: String,
+        code: String,
+        output: String,
+        confirmed: bool,
+        reason: String,
+    },
     Strategies(Vec<Strategy>),
-    Branch { id: String, status: String, note: String },
-    Result { winner: String, title: String, rationale: String, diff: String },
+    Branch {
+        id: String,
+        status: String,
+        note: String,
+    },
+    Result {
+        winner: String,
+        title: String,
+        rationale: String,
+        diff: String,
+    },
 }
 
 #[derive(Clone)]
@@ -328,12 +348,7 @@ pub async fn run(client: Client, config: Config, cwd: PathBuf, input: String, au
     let (winner, title, rationale) = review(&ctx, &issue, &passed).await?;
     let chosen = passed.iter().find(|c| c.id == winner).unwrap_or(&passed[0]);
     ctx.stage("Review", Status::Done, format!("selected {}", chosen.id));
-    ctx.send(FixEvent::Result {
-        winner: chosen.id.clone(),
-        title: title.clone(),
-        rationale,
-        diff: chosen.diff.clone(),
-    });
+    ctx.send(FixEvent::Result { winner: chosen.id.clone(), title: title.clone(), rationale, diff: chosen.diff.clone() });
 
     if ask(&ctx.tx, "Apply this patch to your working tree".into(), None, None).await != Decision::No {
         let patch_file = trees.dir.join("winner.patch");
@@ -371,13 +386,16 @@ async fn investigate(ctx: &Ctx, root: &Path, issue: &str) -> Result<Value> {
     for step in 0..16 {
         let last = step == 15;
         let resp = ctx
-            .chat(Tier::Coder, Request {
-                messages: messages.clone(),
-                tools: specs.clone(),
-                tool_choice: last.then(|| json!({"type": "function", "function": {"name": "report"}})),
-                max_tokens: Some(8192),
-                ..Default::default()
-            })
+            .chat(
+                Tier::Coder,
+                Request {
+                    messages: messages.clone(),
+                    tools: specs.clone(),
+                    tool_choice: last.then(|| json!({"type": "function", "function": {"name": "report"}})),
+                    max_tokens: Some(8192),
+                    ..Default::default()
+                },
+            )
             .await?;
         messages.push(Message::assistant(resp.content.clone(), resp.tool_calls.clone()));
         if resp.tool_calls.is_empty() {
@@ -437,12 +455,7 @@ async fn reproduce(ctx: &Ctx, root: &Path, issue: &str, report: &Value, prefix: 
     let mut attempt = 0;
     for _ in 0..30 {
         let resp = ctx
-            .chat(Tier::Coder, Request {
-                messages: messages.clone(),
-                tools: specs.clone(),
-                max_tokens: Some(8192),
-                ..Default::default()
-            })
+            .chat(Tier::Coder, Request { messages: messages.clone(), tools: specs.clone(), max_tokens: Some(8192), ..Default::default() })
             .await?;
         messages.push(Message::assistant(resp.content.clone(), resp.tool_calls.clone()));
         if resp.tool_calls.is_empty() {
@@ -478,7 +491,14 @@ async fn reproduce(ctx: &Ctx, root: &Path, issue: &str, report: &Value, prefix: 
             ctx.send(FixEvent::Activity(format!("running {command}")));
             let out = run_command(root, &format!("{prefix}{command}"), TEST_TIMEOUT).await;
             let (confirmed, reason) = judge(ctx, issue, &code, &out).await?;
-            ctx.send(FixEvent::Repro { attempt, path: path.clone(), code: code.clone(), output: tail(&out.output, 2500), confirmed, reason: reason.clone() });
+            ctx.send(FixEvent::Repro {
+                attempt,
+                path: path.clone(),
+                code: code.clone(),
+                output: tail(&out.output, 2500),
+                confirmed,
+                reason: reason.clone(),
+            });
             if confirmed {
                 return Ok(Repro { path, code, command, failure: tail(&out.output, 3000) });
             }
@@ -486,11 +506,14 @@ async fn reproduce(ctx: &Ctx, root: &Path, issue: &str, report: &Value, prefix: 
             if attempt >= 4 {
                 break;
             }
-            messages.push(Message::tool(call.id.clone(), format!(
-                "Result: {}\n{}\n\nRejected: {reason}\nFix the test (check the real API with the tools if needed) and submit again.",
-                if out.timed_out { "timed out".to_string() } else { format!("exit code {:?}", out.code) },
-                tail(&out.output, 3000)
-            )));
+            messages.push(Message::tool(
+                call.id.clone(),
+                format!(
+                    "Result: {}\n{}\n\nRejected: {reason}\nFix the test (check the real API with the tools if needed) and submit again.",
+                    if out.timed_out { "timed out".to_string() } else { format!("exit code {:?}", out.code) },
+                    tail(&out.output, 3000)
+                ),
+            ));
         }
         if attempt >= 4 {
             break;
@@ -516,15 +539,19 @@ async fn judge(ctx: &Ctx, issue: &str, code: &str, out: &CommandOutput) -> Resul
             "required": ["reproduces", "reason"]}),
     );
     let v = ctx
-        .structured(Tier::Fast, vec![
-            Message::system(
-                "You check whether a failing test genuinely reproduces a bug report. It is genuine only if it fails \
+        .structured(
+            Tier::Fast,
+            vec![
+                Message::system(
+                    "You check whether a failing test genuinely reproduces a bug report. It is genuine only if it fails \
                  BECAUSE of the reported misbehavior (wrong value, the reported error...). It is NOT genuine if it \
                  fails because the test itself is broken: compile/import errors, wrong names, missing fixtures, syntax \
                  errors, or asserting something unrelated to the report.",
-            ),
-            Message::user(format!("BUG REPORT\n{issue}\n\nTEST\n```\n{code}\n```\n\nOUTPUT\n{}", tail(&out.output, 4000))),
-        ], verdict)
+                ),
+                Message::user(format!("BUG REPORT\n{issue}\n\nTEST\n```\n{code}\n```\n\nOUTPUT\n{}", tail(&out.output, 4000))),
+            ],
+            verdict,
+        )
         .await?;
     Ok((v["reproduces"].as_bool().unwrap_or(false), v["reason"].as_str().unwrap_or("").to_string()))
 }
@@ -540,20 +567,24 @@ async fn plan(ctx: &Ctx, issue: &str, report: &Value, repro: &Repro) -> Result<V
             "required": ["title", "approach"]}}}, "required": ["strategies"]}),
     );
     let v = ctx
-        .structured(Tier::Reasoner, vec![
-            Message::system(format!(
-                "You are a senior engineer. A bug has a failing reproduction test. Propose {n} genuinely DIFFERENT fix \
+        .structured(
+            Tier::Reasoner,
+            vec![
+                Message::system(format!(
+                    "You are a senior engineer. A bug has a failing reproduction test. Propose {n} genuinely DIFFERENT fix \
                  strategies (different locations, mechanisms or scope, not rewordings of one idea). Prefer fixing the \
                  root cause over special-casing the test's inputs, and avoid changing global or process-wide state."
-            )),
-            Message::user(format!(
-                "BUG REPORT\n{issue}\n\nINVESTIGATION\n{}\n\nFAILING TEST ({})\n```\n{}\n```\n\nFAILURE\n{}",
-                serde_json::to_string_pretty(report).unwrap_or_default(),
-                repro.path,
-                repro.code,
-                repro.failure
-            )),
-        ], spec)
+                )),
+                Message::user(format!(
+                    "BUG REPORT\n{issue}\n\nINVESTIGATION\n{}\n\nFAILING TEST ({})\n```\n{}\n```\n\nFAILURE\n{}",
+                    serde_json::to_string_pretty(report).unwrap_or_default(),
+                    repro.path,
+                    repro.code,
+                    repro.failure
+                )),
+            ],
+            spec,
+        )
         .await?;
     let strategies: Vec<Strategy> = v["strategies"]
         .as_array()
@@ -652,10 +683,8 @@ impl Branch {
             let repro = run_command(&self.root, &format!("{}{}", self.prefix, self.repro.command), TEST_TIMEOUT).await;
             if !repro.success() {
                 self.status("failing", format!("round {round}: reproduction test still fails"));
-                messages.push(feedback(format!(
-                    "The reproduction test still fails:\n{}\nKeep working on the fix.",
-                    tail(&repro.output, 3000)
-                )));
+                messages
+                    .push(feedback(format!("The reproduction test still fails:\n{}\nKeep working on the fix.", tail(&repro.output, 3000))));
                 continue;
             }
             self.status("testing", format!("round {round}: repro passes; running full suite"));
@@ -685,12 +714,10 @@ impl Branch {
         for _ in 0..25 {
             let resp = self
                 .ctx
-                .chat(Tier::Coder, Request {
-                    messages: messages.clone(),
-                    tools: specs.to_vec(),
-                    max_tokens: Some(8192),
-                    ..Default::default()
-                })
+                .chat(
+                    Tier::Coder,
+                    Request { messages: messages.clone(), tools: specs.to_vec(), max_tokens: Some(8192), ..Default::default() },
+                )
                 .await?;
             let mut reply = Message::assistant(resp.content.clone(), resp.tool_calls.clone());
             if resp.tool_calls.is_empty() {
@@ -746,10 +773,14 @@ impl Branch {
         );
         let v = self
             .ctx
-            .structured(Tier::Fast, vec![
-                Message::system("Compare two test-suite outputs and decide whether the second has failures the first did not."),
-                Message::user(format!("BEFORE\n{}\n\nAFTER\n{}", self.baseline_output, tail(&suite.output, 3000))),
-            ], spec)
+            .structured(
+                Tier::Fast,
+                vec![
+                    Message::system("Compare two test-suite outputs and decide whether the second has failures the first did not."),
+                    Message::user(format!("BEFORE\n{}\n\nAFTER\n{}", self.baseline_output, tail(&suite.output, 3000))),
+                ],
+                spec,
+            )
             .await?;
         Ok(v["new_failures"].as_bool().unwrap_or(true).then(|| v["explanation"].as_str().unwrap_or("new failures").to_string()))
     }
@@ -765,20 +796,22 @@ async fn review(ctx: &Ctx, issue: &str, passed: &[Candidate]) -> Result<(String,
             "rationale": {"type": "string", "description": "Why this one (2-3 sentences)"}},
             "required": ["winner", "title", "rationale"]}),
     );
-    let candidates: String = passed
-        .iter()
-        .map(|c| format!("## {}: {}\n```diff\n{}\n```\n", c.id, c.title, tools::truncate(&c.diff, 12_000)))
-        .collect();
+    let candidates: String =
+        passed.iter().map(|c| format!("## {}: {}\n```diff\n{}\n```\n", c.id, c.title, tools::truncate(&c.diff, 12_000))).collect();
     let v = ctx
-        .structured(Tier::Reasoner, vec![
-            Message::system(
-                "Every candidate patch below makes the reproduction test pass with no new test failures. Choose the one \
+        .structured(
+            Tier::Reasoner,
+            vec![
+                Message::system(
+                    "Every candidate patch below makes the reproduction test pass with no new test failures. Choose the one \
                  a maintainer should merge: correct at the root cause, minimal, idiomatic, least risky for other callers. \
                  Strongly prefer local changes over ones that modify global or process-wide state (module-level \
                  configuration, global contexts, monkey-patching), and over ones that change behavior beyond the bug.",
-            ),
-            Message::user(format!("BUG REPORT\n{issue}\n\nCANDIDATES\n{candidates}")),
-        ], spec)
+                ),
+                Message::user(format!("BUG REPORT\n{issue}\n\nCANDIDATES\n{candidates}")),
+            ],
+            spec,
+        )
         .await?;
     Ok((
         v["winner"].as_str().unwrap_or("").trim().to_string(),

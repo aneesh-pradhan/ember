@@ -181,7 +181,9 @@ fn s<'a>(args: &'a Value, key: &str) -> &'a str {
 pub fn summary(name: &str, args: &Value) -> String {
     match name {
         "read_file" => format!("Read {}", read_paths(args).join(", ")),
-        "list_files" => format!("List {} {}", if s(args, "path").is_empty() { "." } else { s(args, "path") }, s(args, "glob")).trim_end().to_string(),
+        "list_files" => {
+            format!("List {} {}", if s(args, "path").is_empty() { "." } else { s(args, "path") }, s(args, "glob")).trim_end().to_string()
+        }
         "grep" => format!("Search /{}/ {}", s(args, "pattern"), s(args, "glob")).trim_end().to_string(),
         "edit_file" => {
             let edits = edit_list(args);
@@ -232,11 +234,7 @@ pub fn preview(ws: &Workspace, name: &str, args: &Value) -> Option<String> {
 }
 
 pub fn diff(path: &str, old: &str, new: &str) -> String {
-    TextDiff::from_lines(old, new)
-        .unified_diff()
-        .context_radius(3)
-        .header(&format!("a/{path}"), &format!("b/{path}"))
-        .to_string()
+    TextDiff::from_lines(old, new).unified_diff().context_radius(3).header(&format!("a/{path}"), &format!("b/{path}")).to_string()
 }
 
 /// Run a tool. Errors are returned as text for the model to read and recover from.
@@ -261,12 +259,7 @@ pub async fn run(ws: &Workspace, name: &str, args: &Value) -> Result<String, Str
 
 /// The files a read_file call asks for: `paths` (batched) and/or `path`.
 fn read_paths(args: &Value) -> Vec<String> {
-    let mut paths: Vec<String> = args["paths"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|p| p.as_str().map(String::from))
-        .collect();
+    let mut paths: Vec<String> = args["paths"].as_array().into_iter().flatten().filter_map(|p| p.as_str().map(String::from)).collect();
     if let Some(p) = args["path"].as_str().filter(|p| !p.is_empty()) {
         if !paths.iter().any(|x| x == p) {
             paths.insert(0, p.to_string());
@@ -405,7 +398,8 @@ fn replace(text: &str, old: &str, new: &str, replace_all: bool) -> Result<String
     }
     if count > 1 {
         // Say where, so the model can pick lines that make it unique without reading the file again.
-        let lines: Vec<String> = text.match_indices(old).take(8).map(|(at, _)| (text[..at].matches('\n').count() + 1).to_string()).collect();
+        let lines: Vec<String> =
+            text.match_indices(old).take(8).map(|(at, _)| (text[..at].matches('\n').count() + 1).to_string()).collect();
         let more = if count > lines.len() { ", …" } else { "" };
         return Err(format!(
             "old_string matches {count} places (lines {}{more}); include more surrounding lines to make it unique, or set replace_all",
@@ -475,12 +469,8 @@ fn replace_reindented(lines: &[&str], needle: &[&str], new: &str) -> Option<Stri
             format!("{}{line}", " ".repeat((-delta) as usize))
         }
     };
-    let reindented: Vec<String> = new
-        .trim_end_matches('\n')
-        .lines()
-        .enumerate()
-        .map(|(k, l)| shift(l, if k == 0 { first } else { rest.unwrap_or(first) }))
-        .collect();
+    let reindented: Vec<String> =
+        new.trim_end_matches('\n').lines().enumerate().map(|(k, l)| shift(l, if k == 0 { first } else { rest.unwrap_or(first) })).collect();
     let last = lines[i + needle.len() - 1];
     let mut out: String = lines[..i].concat();
     out.push_str(&reindented.join("\n"));
@@ -615,11 +605,8 @@ impl CommandOutput {
     }
 
     pub fn render(&self) -> String {
-        let status = if self.timed_out {
-            "timed out".to_string()
-        } else {
-            format!("exit code {}", self.code.map_or("?".into(), |c| c.to_string()))
-        };
+        let status =
+            if self.timed_out { "timed out".to_string() } else { format!("exit code {}", self.code.map_or("?".into(), |c| c.to_string())) };
         // Already capped while reading (see `Capture`).
         format!("{}\n[{status}]", self.output.trim_end())
     }
@@ -664,11 +651,7 @@ impl Capture {
         }
         let start = tail.iter().take(3).take_while(|&&b| b & 0xC0 == 0x80).count();
         let omitted = self.omitted + (self.head.len() - head.len()) + start;
-        format!(
-            "{}\n\n... ({omitted} bytes omitted) ...\n\n{}",
-            String::from_utf8_lossy(head),
-            String::from_utf8_lossy(&tail[start..])
-        )
+        format!("{}\n\n... ({omitted} bytes omitted) ...\n\n{}", String::from_utf8_lossy(head), String::from_utf8_lossy(&tail[start..]))
     }
 }
 
@@ -709,11 +692,7 @@ pub async fn run_command(dir: &Path, command: &str, timeout: Duration) -> Comman
     match result {
         Ok(status) => {
             group.0 = None;
-            CommandOutput {
-                code: status.ok().and_then(|s| s.code()),
-                output: buf.text(),
-                timed_out: false,
-            }
+            CommandOutput { code: status.ok().and_then(|s| s.code()), output: buf.text(), timed_out: false }
         }
         Err(_) => {
             drop(group);
@@ -911,17 +890,25 @@ mod tests {
 
         // One failing edit leaves every file untouched and says which edit failed.
         reset();
-        let err = edit_file(&ws, &json!({"edits": [
+        let err = edit_file(
+            &ws,
+            &json!({"edits": [
             {"path": "a.py", "old_string": "x = 1", "new_string": "x = 10"},
-            {"path": "b.py", "old_string": "nope", "new_string": "z"}]})).unwrap_err();
+            {"path": "b.py", "old_string": "nope", "new_string": "z"}]}),
+        )
+        .unwrap_err();
         assert!(err.starts_with("Edit 2 of 2 (b.py): ") && err.ends_with("No files were changed."), "{err}");
         assert_eq!((read("a.py"), read("b.py")), ("x = 1\ny = 2\n".into(), "print(x)\n".into()));
 
         // A top-level path covers edits that don't name one; an edit with no path at all is a clear error.
         reset();
-        edit_file(&ws, &json!({"path": "a.py", "edits": [
+        edit_file(
+            &ws,
+            &json!({"path": "a.py", "edits": [
             {"old_string": "x = 1", "new_string": "x = 5"},
-            {"path": "b.py", "old_string": "print(x)", "new_string": "print(-x)"}]})).unwrap();
+            {"path": "b.py", "old_string": "print(x)", "new_string": "print(-x)"}]}),
+        )
+        .unwrap();
         assert_eq!((read("a.py"), read("b.py")), ("x = 5\ny = 2\n".into(), "print(-x)\n".into()));
         let err = edit_file(&ws, &json!({"edits": [{"old_string": "a", "new_string": "b"}]})).unwrap_err();
         assert!(err.contains("no path given"), "{err}");
