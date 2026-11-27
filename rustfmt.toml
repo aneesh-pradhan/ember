@@ -1,0 +1,3 @@
+# Sources are written wide. Keep that width so `cargo fmt --check` matches the tree.
+max_width = 140
+use_small_heuristics = "Max"

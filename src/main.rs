@@ -10,9 +10,9 @@ mod logo;
 mod markdown;
 mod math;
 mod mcp;
-mod permissions;
 #[cfg(test)]
 mod mock;
+mod permissions;
 mod repomap;
 mod session;
 mod theme;
@@ -105,7 +105,13 @@ async fn main() -> Result<()> {
         let options = PrintOptions { yes: cli.yes, think, resume: cli.resume, max_steps: cli.max_steps };
         return print_mode(config, cwd, prompt, options).await;
     }
-    let mode = if cli.yes { Mode::Auto } else if cli.plan { Mode::Plan } else { Mode::Ask };
+    let mode = if cli.yes {
+        Mode::Auto
+    } else if cli.plan {
+        Mode::Plan
+    } else {
+        Mode::Ask
+    };
     ui::run(config, cwd, mode, cli.prompt, cli.resume, think, cli.max_steps).await
 }
 
@@ -217,7 +223,9 @@ async fn print_mode(config: Config, cwd: std::path::PathBuf, prompt: String, opt
         let unknown = if costs.iter().any(Option::is_none) { "≥" } else { "" };
         format!(", {unknown}{}", crate::config::format_cost(costs.iter().flatten().sum()))
     };
-    eprintln!("[usage] {steps} model calls, {tools} tool calls, {prompt_tokens} input tokens ({pct}% cached), {completion} output tokens{total}");
+    eprintln!(
+        "[usage] {steps} model calls, {tools} tool calls, {prompt_tokens} input tokens ({pct}% cached), {completion} output tokens{total}"
+    );
     for ((model, [calls, input, cached, output]), cost) in by_model.into_iter().zip(costs) {
         let cost = cost.map(|c| format!(", {}", crate::config::format_cost(c))).unwrap_or_default();
         eprintln!("[usage:model] {model}: {calls} calls, {input} input, {cached} cached, {output} output{cost}");

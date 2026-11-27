@@ -6,29 +6,97 @@
   <a href="https://github.com/aneesh-pradhan/ember/actions/workflows/ci.yml"><img src="https://github.com/aneesh-pradhan/ember/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/aneesh-pradhan/ember/releases/latest"><img src="https://img.shields.io/github/v/release/aneesh-pradhan/ember?color=ff85c0" alt="Release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/aneesh-pradhan/ember?color=c4a2ff" alt="License: MIT"></a>
-  <img src="https://img.shields.io/badge/rust-1.80%2B-ff7a3d?logo=rust" alt="Rust 1.80+">
+  <img src="https://img.shields.io/badge/rust-1.88%2B-ff7a3d?logo=rust" alt="Rust 1.88+">
   <img src="https://img.shields.io/badge/NVIDIA-Nemotron-76b900?logo=nvidia&logoColor=white" alt="NVIDIA Nemotron">
   <a href="https://tokenfactory.nebius.com"><img src="https://img.shields.io/badge/Nebius-Token%20Factory-8cc4ff" alt="Nebius Token Factory"></a>
 </p>
 
 <p align="center"><b>A terminal coding agent powered by NVIDIA Nemotron on Nebius Token Factory, written in Rust.</b></p>
 
-ember lives in your terminal. Ask it to explain code, build a feature, or fix a failing build. It reads
-and searches your project, edits files, and runs commands. Before any edit or command, it shows you
-the diff or the command line and asks for approval. The conversation stays in your terminal's normal
-scrollback, so you can scroll, search, and copy it like any other output.
+Ask ember to explain a project, add a feature, or fix a failing build. It reads and searches the code, then shows the diff or the command and waits for approval before it edits a file or runs anything. `/fix` will not apply a patch until a new test fails on the current code and passes after the change.
 
-<!-- Demo: record a short GIF of /fix (failing test, then the passing fix) and add it here,
-     e.g. ![ember running /fix](docs/demo.gif) -->
+## Prerequisites
+
+- **git**
+- **Rust 1.88 or newer**, installed with [rustup](https://rustup.rs). [`rust-toolchain.toml`](rust-toolchain.toml) pins **1.88.0**, and `Cargo.toml` sets `rust-version = "1.88"`. That is the minimum this lockfile builds with: `icu_normalizer` 2.4, `ignore` 0.4.34, and `darling_macro` 0.24 declare Rust 1.88, and several of those crates use edition 2024, which Rust 1.80 cannot compile. Current stable also builds (checked with Rust 1.100.0).
+- **A [Nebius Token Factory API key](https://tokenfactory.nebius.com/project/api-keys)**, only if you want the model. Building, testing, `--help`, and `--version` do not use one. See [Run without an API key](#run-without-an-api-key).
+
+macOS and Linux are supported (x86_64 and ARM64). The published Linux binaries are static musl builds.
+
+## Build, test, and run
+
+From a clean clone, with rustup on your `PATH`. Entering the directory selects the pinned 1.88.0 toolchain. `--locked` refuses to update `Cargo.lock`.
+
+```bash
+git clone https://github.com/aneesh-pradhan/ember
+cd ember
+cargo build --locked
+cargo test --locked
+cargo run --locked -- --version
+cargo run --locked -- --help
+```
+
+The same checks as [CI](.github/workflows/ci.yml):
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
+```
+
+## Run without an API key
+
+The commands above never call a model. The full-screen UI starts with no key, prints a warning, and does not send a request until you ask it something:
+
+```bash
+cargo run --locked
+```
+
+A prompt with no key and no local server stops before the network. Captured with a clean `HOME` and no `NEBIUS_API_KEY`:
+
+```text
+$ cargo run --locked --quiet -- -p "say hi"
+Error: NEBIUS_API_KEY is not set (put it in .env or ~/.config/ember/env)
+```
+
+To talk to Nemotron, copy the starter env file and set the key. To talk to a model on your own machine, point `EMBER_BASE_URL` at an OpenAI-compatible server and leave the Nebius key unset. `TAVILY_API_KEY` is optional; without it ember still runs, and `web_search` is left out.
+
+```bash
+cp .env.example .env
+# set NEBIUS_API_KEY in .env, then:
+cargo run --locked
+```
+
+```bash
+EMBER_BASE_URL=http://127.0.0.1:8000/v1 \
+EMBER_MODEL_CODER=your-local-model-id \
+cargo run --locked
+```
+
+Every variable is in [`.env.example`](.env.example) and [docs/configuration.md](docs/configuration.md).
+
+## Demo
+
+Recorded from `target/debug/ember` in a 100×24 terminal, with no API key and an empty home directory (no `~/.config/ember/env`). The clip holds the idle screen, then `/`, which opens the command menu. `/fix` calls Nemotron, so this is the UI, not a completed fix. A still of the idle screen is [docs/demo.png](docs/demo.png).
+
+![ember idle, then the slash-command menu](docs/demo.gif)
+
+```text
+$ cargo run --locked --quiet -- --version
+ember 0.9.0
+```
 
 ## Contents
 
+- [Prerequisites](#prerequisites)
+- [Build, test, and run](#build-test-and-run)
+- [Run without an API key](#run-without-an-api-key)
 - [`/fix`: a bug proven before it's fixed](#fix-a-bug-proven-before-its-fixed)
 - [How it uses Nemotron](#how-it-uses-nemotron-on-nebius-token-factory)
 - [Install](#install)
 - [Use](#use)
 - [Configuration](docs/configuration.md) and [running on your own hardware](docs/configuration.md#run-nemotron-on-your-own-hardware)
-- [Design](#design)
+- [Architecture](#architecture)
 
 ## `/fix`: a bug proven before it's fixed
 
@@ -114,10 +182,10 @@ Then run `ember` inside any project.
 
 ### Build from source
 
-Install Rust 1.80+ (via [rustup](https://rustup.rs), Homebrew, or your package manager), then:
+Install Rust 1.88 or newer with [rustup](https://rustup.rs). A clone already pins 1.88.0; the commands are in [Build, test, and run](#build-test-and-run). To install a release-profile binary onto `PATH` from the git repo:
 
 ```bash
-cargo install --git https://github.com/aneesh-pradhan/ember
+cargo install --locked --git https://github.com/aneesh-pradhan/ember
 ```
 
 ### Installer options, updating and uninstalling
@@ -251,35 +319,13 @@ mascot_blink = true
 
 Animations stay off when stdout isn't a terminal, when `CI` or `NO_COLOR` is set, or when `EMBER_REDUCED_MOTION=1`. The working spinner that was already there keeps its existing behavior.
 
-## Design
+## Architecture
 
-```
-src/
-  main.rs      CLI (interactive, print mode)
-  config.rs    settings from the environment, ~/.config/ember/env, and a project .env
-  ui.rs        full-screen Ratatui TUI: conversation, prompt box, suggestions, permission panel, status line
-  input.rs     multi-line line editor with history
-  theme.rs     palette: warm accents on whatever background the terminal has
-  agent.rs     agent loop: stream → tool calls → approval → results → repeat; checkpoints for /undo
-  fix.rs       /fix pipeline over git worktrees
-  git.rs       /commit, /branch, /pr and git status
-  llm.rs       streaming OpenAI-compatible client: SSE, tool-call assembly, <think> splitting, retries
-  tools.rs     read_file, list_files, grep (.gitignore-aware), edit_file, write_file, bash
-  web.rs       web_search (Tavily) and web_fetch
-  vision.rs    images through Nemotron VL
-  mcp.rs       MCP client for stdio servers
-  commands.rs  custom slash commands
-  session.rs   saved conversations for /resume and --continue
-  markdown.rs  Markdown rendering and word wrapping for the terminal
-  logo.rs      the chibi mascot
-```
+ember is one binary. The terminal UI and print mode (`-p`) share an agent loop: stream an OpenAI-compatible completion, approve the tool call, run it, repeat. `/fix` is a second pipeline on that loop. It proves the bug with a failing test, tries each strategy in its own git worktree, and applies a winner only after you approve. The file map and the request path are in [docs/architecture.md](docs/architecture.md).
 
 ## Development
 
-```bash
-cargo build
-cargo test
-```
+CI runs `cargo fmt --all -- --check`, `cargo clippy --locked --all-targets -- -D warnings`, and `cargo test --locked` on Rust 1.88.0. Those commands, and how to run without an API key, are in [Build, test, and run](#build-test-and-run). Formatting follows [`rustfmt.toml`](rustfmt.toml).
 
 Issues and pull requests are welcome on [GitHub](https://github.com/aneesh-pradhan/ember/issues).
 

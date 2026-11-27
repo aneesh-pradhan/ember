@@ -58,16 +58,20 @@ fn tool_results(request: &Value) -> Vec<String> {
 }
 
 fn replies(events: &[AgentEvent]) -> Vec<String> {
-    events.iter().filter_map(|e| match e {
-        AgentEvent::Reply { content, .. } if !content.is_empty() => Some(content.clone()),
-        _ => None,
-    }).collect()
+    events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::Reply { content, .. } if !content.is_empty() => Some(content.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 #[tokio::test]
 async fn runs_tools_and_sends_results_back() {
     let dir = project(&[("notes.txt", "the answer is 42\n")]);
-    let model = MockModel::start(vec![Reply::Tools(vec![call("read_file", json!({"path": "notes.txt"}))]), Reply::Text("It says 42.")]).await;
+    let model =
+        MockModel::start(vec![Reply::Tools(vec![call("read_file", json!({"path": "notes.txt"}))]), Reply::Text("It says 42.")]).await;
     let mut a = agent(&model, &dir, Mode::Ask);
     let events = turn(&mut a, "What do my notes say?", Decision::No).await;
 
@@ -162,10 +166,13 @@ async fn batched_edits_need_one_approval_and_undo_together() {
     let mut a = agent(&model, &dir, Mode::Ask);
     let events = turn(&mut a, "double it", Decision::Yes).await;
 
-    let prompts: Vec<_> = events.iter().filter_map(|e| match e {
-        AgentEvent::Notice(n) if n.starts_with("approval") => Some(n.clone()),
-        _ => None,
-    }).collect();
+    let prompts: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::Notice(n) if n.starts_with("approval") => Some(n.clone()),
+            _ => None,
+        })
+        .collect();
     assert_eq!(prompts, ["approval: Edit a.py, b.py (2 edits)"]);
     let read = |f: &str| std::fs::read_to_string(dir.join(f)).unwrap();
     assert_eq!((read("a.py"), read("b.py")), ("x = 2\n".into(), "print(x * 2)\n".into()));
@@ -201,10 +208,13 @@ async fn retries_dropped_connections_broken_streams_and_server_errors() {
 }
 
 fn approvals(events: &[AgentEvent]) -> Vec<String> {
-    events.iter().filter_map(|e| match e {
-        AgentEvent::Notice(n) => n.strip_prefix("approval: ").map(String::from),
-        _ => None,
-    }).collect()
+    events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::Notice(n) => n.strip_prefix("approval: ").map(String::from),
+            _ => None,
+        })
+        .collect()
 }
 
 /// "Always" lasts for the session; `/permissions save` keeps it for the project in the user's config, so a new
@@ -215,9 +225,13 @@ async fn saved_permissions_carry_over_to_new_sessions() {
     let file = dir.join("config/permissions.json");
     let bash = |cmd: &str| Reply::Tools(vec![call("bash", json!({"command": cmd}))]);
     let model = MockModel::start(vec![
-        bash("ls -a"), Reply::Text("listed"),
-        bash("ls -l"), bash("pwd -L"), Reply::Text("done"),
-        bash("ls -l"), Reply::Text("asked"),
+        bash("ls -a"),
+        Reply::Text("listed"),
+        bash("ls -l"),
+        bash("pwd -L"),
+        Reply::Text("done"),
+        bash("ls -l"),
+        Reply::Text("asked"),
     ])
     .await;
 
@@ -247,10 +261,13 @@ async fn names_new_files_by_full_path() {
     let mut a = agent(&model, &dir, Mode::Auto);
     let events = turn(&mut a, "make a page", Decision::No).await;
 
-    let notes: Vec<_> = events.iter().filter_map(|e| match e {
-        AgentEvent::Notice(n) => Some(n.clone()),
-        _ => None,
-    }).collect();
+    let notes: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::Notice(n) => Some(n.clone()),
+            _ => None,
+        })
+        .collect();
     assert_eq!(notes, [format!("New files: {}", dir.join("site/index.html").display())]);
 }
 
@@ -297,7 +314,9 @@ async fn warns_before_the_step_limit_and_stops_at_it() {
 
     let requests = model.requests();
     assert_eq!(requests.len(), 7);
-    let warned: Vec<usize> = requests.iter().enumerate()
+    let warned: Vec<usize> = requests
+        .iter()
+        .enumerate()
         .filter(|(_, r)| tool_results(r).iter().any(|t| t.contains("steps left in this turn")))
         .map(|(i, _)| i)
         .collect();
@@ -316,9 +335,12 @@ async fn web_fetch_asks_per_host() {
     // Port 1 refuses connections, so approved fetches fail fast without touching the network.
     let fetch = |url: &str| call("web_fetch", json!({"url": url}));
     let model = MockModel::start(vec![
-        Reply::Tools(vec![fetch("http://127.0.0.1:1/a?q=secret")]), Reply::Text("declined"),
-        Reply::Tools(vec![fetch("http://127.0.0.1:1/a")]), Reply::Text("fetched"),
-        Reply::Tools(vec![fetch("http://127.0.0.1:1/b"), fetch("http://LOCALHOST:1/c")]), Reply::Text("done"),
+        Reply::Tools(vec![fetch("http://127.0.0.1:1/a?q=secret")]),
+        Reply::Text("declined"),
+        Reply::Tools(vec![fetch("http://127.0.0.1:1/a")]),
+        Reply::Text("fetched"),
+        Reply::Tools(vec![fetch("http://127.0.0.1:1/b"), fetch("http://LOCALHOST:1/c")]),
+        Reply::Text("done"),
     ])
     .await;
     let mut a = agent(&model, &dir, Mode::Ask);

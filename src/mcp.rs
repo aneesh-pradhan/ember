@@ -314,10 +314,9 @@ impl Mcp {
             .find(|t| t.qualified() == qualified)
             .cloned()
             .ok_or_else(|| anyhow!("unknown MCP tool {qualified}"))?;
-        let server = self.servers.lock().unwrap().get(&tool.server).cloned().ok_or_else(|| anyhow!("server {} is not running", tool.server))?;
-        let result = server
-            .request("tools/call", json!({"name": tool.name, "arguments": args}), Duration::from_secs(180))
-            .await?;
+        let server =
+            self.servers.lock().unwrap().get(&tool.server).cloned().ok_or_else(|| anyhow!("server {} is not running", tool.server))?;
+        let result = server.request("tools/call", json!({"name": tool.name, "arguments": args}), Duration::from_secs(180)).await?;
         let mut out = String::new();
         for item in result["content"].as_array().into_iter().flatten() {
             match item["type"].as_str() {

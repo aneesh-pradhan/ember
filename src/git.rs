@@ -67,7 +67,12 @@ async fn draft(client: &Client, model: &str, system: &str, user: String, tx: &Ev
             |_| {},
         )
         .await?;
-    let _ = tx.send(AgentEvent::Usage { model: model.into(), prompt: resp.usage.prompt_tokens, completion: resp.usage.completion_tokens, cached: resp.usage.cached_tokens });
+    let _ = tx.send(AgentEvent::Usage {
+        model: model.into(),
+        prompt: resp.usage.prompt_tokens,
+        completion: resp.usage.completion_tokens,
+        cached: resp.usage.cached_tokens,
+    });
     Ok(resp.content.trim().trim_matches('`').trim().to_string())
 }
 

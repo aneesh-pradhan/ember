@@ -67,10 +67,7 @@ impl Renderer {
             Event::End(tag) => self.end(tag),
             Event::Text(text) if self.in_code => {
                 for line in text.lines() {
-                    self.lines.push(Line::from(vec![
-                        Span::styled("  │ ", theme::dim()),
-                        Span::styled(line.to_string(), theme::code()),
-                    ]));
+                    self.lines.push(Line::from(vec![Span::styled("  │ ", theme::dim()), Span::styled(line.to_string(), theme::code())]));
                 }
             }
             Event::Text(text) => {

@@ -40,7 +40,11 @@ impl Theme {
 static CURRENT: AtomicU8 = AtomicU8::new(0);
 
 pub fn current() -> Theme {
-    if CURRENT.load(Ordering::Relaxed) == 1 { Theme::Classic } else { Theme::Kawaii }
+    if CURRENT.load(Ordering::Relaxed) == 1 {
+        Theme::Classic
+    } else {
+        Theme::Kawaii
+    }
 }
 
 pub fn set(theme: Theme) {

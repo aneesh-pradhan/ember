@@ -84,13 +84,31 @@ pub enum AgentEvent {
     /// A model request failed and is being retried: drop what streamed so far.
     Retrying(String),
     /// A model reply finished streaming.
-    Reply { content: String, thought_secs: Option<f32> },
-    ToolStart { summary: String },
-    ToolDone { name: String, summary: String, output: String, ok: bool },
+    Reply {
+        content: String,
+        thought_secs: Option<f32>,
+    },
+    ToolStart {
+        summary: String,
+    },
+    ToolDone {
+        name: String,
+        summary: String,
+        output: String,
+        ok: bool,
+    },
     Approval(ApprovalRequest),
-    Usage { model: String, prompt: u64, completion: u64, cached: u64 },
+    Usage {
+        model: String,
+        prompt: u64,
+        completion: u64,
+        cached: u64,
+    },
     /// How full the main conversation's context window is.
-    Context { used: u64, window: u64 },
+    Context {
+        used: u64,
+        window: u64,
+    },
     Todos(Vec<Todo>),
     Notice(String),
     Fix(FixEvent),
@@ -369,8 +387,7 @@ impl Agent {
         let Some(pos) = self.messages.iter().rposition(|m| m.role == "assistant" && !m.tool_calls.is_empty()) else {
             return;
         };
-        let answered: HashSet<String> =
-            self.messages[pos + 1..].iter().filter_map(|m| m.tool_call_id.clone()).collect();
+        let answered: HashSet<String> = self.messages[pos + 1..].iter().filter_map(|m| m.tool_call_id.clone()).collect();
         let missing: Vec<(String, bool)> = self.messages[pos]
             .tool_calls
             .iter()
@@ -401,8 +418,7 @@ impl Agent {
         if self.messages[pos + 1..].iter().any(|m| m.role != "tool") {
             return None;
         }
-        let answered: HashSet<String> =
-            self.messages[pos + 1..].iter().filter_map(|m| m.tool_call_id.clone()).collect();
+        let answered: HashSet<String> = self.messages[pos + 1..].iter().filter_map(|m| m.tool_call_id.clone()).collect();
         let reply = &mut self.messages[pos];
         if let Some(call) = reply.tool_calls.iter().find(|c| c.function.name == ASK_USER && !answered.contains(&c.id)) {
             return Some(call.id.clone());
@@ -705,12 +721,7 @@ impl Agent {
                     }
                 }
                 Decision::No => {
-                    let _ = tx.send(AgentEvent::ToolDone {
-                        name: name.into(),
-                        summary,
-                        output: "Denied by user".into(),
-                        ok: false,
-                    });
+                    let _ = tx.send(AgentEvent::ToolDone { name: name.into(), summary, output: "Denied by user".into(), ok: false });
                     return "The user declined this action. Stop and ask them how they would like to proceed.".into();
                 }
             }
@@ -729,7 +740,12 @@ impl Agent {
     async fn look_at(&self, path: &Path, request: &str, tx: &Events) -> Result<String> {
         let model = vision_model();
         let (text, usage) = crate::vision::describe(&self.client, &model, path, request).await?;
-        let _ = tx.send(AgentEvent::Usage { model, prompt: usage.prompt_tokens, completion: usage.completion_tokens, cached: usage.cached_tokens });
+        let _ = tx.send(AgentEvent::Usage {
+            model,
+            prompt: usage.prompt_tokens,
+            completion: usage.completion_tokens,
+            cached: usage.cached_tokens,
+        });
         Ok(text)
     }
 
@@ -781,7 +797,12 @@ impl Agent {
                 },
             )
             .await?;
-        let _ = tx.send(AgentEvent::Usage { model: model.into(), prompt: resp.usage.prompt_tokens, completion: resp.usage.completion_tokens, cached: resp.usage.cached_tokens });
+        let _ = tx.send(AgentEvent::Usage {
+            model: model.into(),
+            prompt: resp.usage.prompt_tokens,
+            completion: resp.usage.completion_tokens,
+            cached: resp.usage.cached_tokens,
+        });
         let _ = tx.send(AgentEvent::Reply { content: resp.content.clone(), thought_secs: None });
         self.messages.push(Message::assistant(resp.content, vec![]));
         self.save();
@@ -830,13 +851,15 @@ impl Agent {
                 |_| {},
             )
             .await?;
-        let _ = tx.send(AgentEvent::Usage { model, prompt: resp.usage.prompt_tokens, completion: resp.usage.completion_tokens, cached: resp.usage.cached_tokens });
+        let _ = tx.send(AgentEvent::Usage {
+            model,
+            prompt: resp.usage.prompt_tokens,
+            completion: resp.usage.completion_tokens,
+            cached: resp.usage.cached_tokens,
+        });
         let count = history.len();
         self.messages.truncate(1);
-        self.messages.push(Message::user(format!(
-            "(Earlier conversation was compacted to save context. Summary:)\n\n{}",
-            resp.content
-        )));
+        self.messages.push(Message::user(format!("(Earlier conversation was compacted to save context. Summary:)\n\n{}", resp.content)));
         self.messages.push(Message::assistant(COMPACT_ACK, vec![]));
         self.last_prompt_tokens = 0;
         self.save();
@@ -933,8 +956,13 @@ mod tests {
 
     fn agent(interactive: bool) -> Agent {
         let model = Arc::new(Mutex::new("nvidia/nemotron-3-super-120b-a12b".to_string()));
-        let agent = Agent::new(Client::new("http://localhost", None), model, SharedMode::new(Mode::Ask), Workspace::new(std::env::temp_dir()));
-        if interactive { agent.interactive() } else { agent }
+        let agent =
+            Agent::new(Client::new("http://localhost", None), model, SharedMode::new(Mode::Ask), Workspace::new(std::env::temp_dir()));
+        if interactive {
+            agent.interactive()
+        } else {
+            agent
+        }
     }
 
     #[test]
@@ -953,7 +981,11 @@ mod tests {
         assert_eq!(a.messages.iter().filter(|m| m.role == "user").count(), 1);
 
         // A model-made ask_user call alongside other tools is answered after their results.
-        let call = |id: &str, name: &str| ToolCall { id: id.into(), kind: "function".into(), function: FunctionCall { name: name.into(), arguments: "{}".into() } };
+        let call = |id: &str, name: &str| ToolCall {
+            id: id.into(),
+            kind: "function".into(),
+            function: FunctionCall { name: name.into(), arguments: "{}".into() },
+        };
         a.messages.push(Message::assistant("", vec![call("c1", "read_file"), call("c2", ASK_USER)]));
         a.messages.push(Message::tool("c1", "file text"));
         a.answer_missing(false);
@@ -964,7 +996,11 @@ mod tests {
     #[test]
     fn check_call_explains_unknown_tools_and_broken_arguments() {
         let specs = vec![view_image_spec(), todo_spec()];
-        let call = |name: &str, args: &str| ToolCall { id: "c".into(), kind: "function".into(), function: FunctionCall { name: name.into(), arguments: args.into() } };
+        let call = |name: &str, args: &str| ToolCall {
+            id: "c".into(),
+            kind: "function".into(),
+            function: FunctionCall { name: name.into(), arguments: args.into() },
+        };
         assert_eq!(check_call(&call("view_image", r#"{"path": "a.png"}"#), &specs, false, false), None);
         let unknown = check_call(&call("read_files", "{}"), &specs, false, false).unwrap();
         assert!(unknown.contains("no tool named `read_files`") && unknown.contains("view_image, update_todos"));
@@ -984,7 +1020,8 @@ mod tests {
 
         let mut b = agent(true);
         b.push_input("first".into());
-        let ask = ToolCall { id: "q".into(), kind: "function".into(), function: FunctionCall { name: ASK_USER.into(), arguments: "{}".into() } };
+        let ask =
+            ToolCall { id: "q".into(), kind: "function".into(), function: FunctionCall { name: ASK_USER.into(), arguments: "{}".into() } };
         b.messages.push(Message::assistant("", vec![ask]));
         b.repair();
         assert_eq!(b.messages.last().unwrap().tool_call_id.as_deref(), Some("q"));

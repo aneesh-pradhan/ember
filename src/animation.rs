@@ -90,18 +90,16 @@ fn config_file() -> Option<PathBuf> {
 }
 
 fn read_table() -> toml::Table {
-    config_file()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| toml::from_str::<toml::Table>(&s).ok())
-        .unwrap_or_default()
+    config_file().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|s| toml::from_str::<toml::Table>(&s).ok()).unwrap_or_default()
 }
 
 /// Save `enabled` under `[animation]`, keeping the rest of config.toml. Refuses to rewrite a file it can't parse.
 pub fn save_enabled(enabled: bool) -> std::io::Result<()> {
     let path = config_file().ok_or_else(|| std::io::Error::other("no config directory"))?;
     let mut table = match std::fs::read_to_string(&path) {
-        Ok(text) => toml::from_str::<toml::Table>(&text)
-            .map_err(|e| std::io::Error::other(format!("{} isn't valid TOML: {e}", path.display())))?,
+        Ok(text) => {
+            toml::from_str::<toml::Table>(&text).map_err(|e| std::io::Error::other(format!("{} isn't valid TOML: {e}", path.display())))?
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
         Err(e) => return Err(e),
     };
@@ -148,17 +146,8 @@ impl Motion {
     }
 
     fn with(settings: Settings, muted: bool, now: Instant, seed: u64) -> Motion {
-        let mut motion = Motion {
-            settings,
-            muted,
-            now,
-            started: now,
-            blink_at: now,
-            blink_until: None,
-            rng: seed,
-            burst: None,
-            flash: None,
-        };
+        let mut motion =
+            Motion { settings, muted, now, started: now, blink_at: now, blink_until: None, rng: seed, burst: None, flash: None };
         motion.blink_at = motion.next_blink(now);
         motion
     }
@@ -259,10 +248,7 @@ impl Motion {
 
     /// Whether the status line should show the error color this frame.
     pub fn error_flash(&self) -> bool {
-        self.active()
-            && self
-                .flash
-                .is_some_and(|at| self.now.saturating_duration_since(at) < self.settings.speed.stretch(FLASH))
+        self.active() && self.flash.is_some_and(|at| self.now.saturating_duration_since(at) < self.settings.speed.stretch(FLASH))
     }
 
     /// The spinner beside the working line: a sparkle cycle in kawaii, the braille spinner otherwise. It stops on its

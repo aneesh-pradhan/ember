@@ -78,10 +78,7 @@ pub struct FunctionDef {
 
 impl ToolSpec {
     pub fn new(name: &str, description: &str, parameters: Value) -> Self {
-        ToolSpec {
-            kind: "function",
-            function: FunctionDef { name: name.into(), description: description.into(), parameters },
-        }
+        ToolSpec { kind: "function", function: FunctionDef { name: name.into(), description: description.into(), parameters } }
     }
 }
 
@@ -193,7 +190,11 @@ pub enum Delta<'a> {
 const MAX_RETRIES: u32 = 3;
 
 fn backoff(attempt: u32) -> Duration {
-    if cfg!(test) { Duration::from_millis(10) } else { Duration::from_secs(1 << (attempt - 1)) }
+    if cfg!(test) {
+        Duration::from_millis(10)
+    } else {
+        Duration::from_secs(1 << (attempt - 1))
+    }
 }
 
 /// A non-success HTTP response from the model API.
@@ -280,10 +281,8 @@ impl Client {
         if !status.is_success() {
             bail!("API error {status}: {body}");
         }
-        let mut ids: Vec<String> = body["data"]
-            .as_array()
-            .map(|a| a.iter().filter_map(|m| m["id"].as_str().map(String::from)).collect())
-            .unwrap_or_default();
+        let mut ids: Vec<String> =
+            body["data"].as_array().map(|a| a.iter().filter_map(|m| m["id"].as_str().map(String::from)).collect()).unwrap_or_default();
         ids.sort();
         Ok(ids)
     }
@@ -471,10 +470,7 @@ impl ThinkSplitter {
                 continue;
             }
             // Keep back a possible partial tag at the end.
-            let keep = (1..tag.len())
-                .rev()
-                .find(|&n| self.buf.ends_with(&tag[..n]))
-                .unwrap_or(0);
+            let keep = (1..tag.len()).rev().find(|&n| self.buf.ends_with(&tag[..n])).unwrap_or(0);
             let cut = self.buf.len() - keep;
             parts.push((!self.thinking, self.buf[..cut].to_string()));
             self.buf.drain(..cut);
@@ -548,7 +544,11 @@ mod tests {
         let (mut text, mut think) = (String::new(), String::new());
         let mut push = |parts: Vec<(bool, String)>| {
             for (is_text, p) in parts {
-                if is_text { text.push_str(&p) } else { think.push_str(&p) }
+                if is_text {
+                    text.push_str(&p)
+                } else {
+                    think.push_str(&p)
+                }
             }
         };
         for c in chunks {

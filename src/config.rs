@@ -81,7 +81,11 @@ impl Config {
     /// /compact summaries as well as Super, about 5x cheaper), else the coder model.
     fn with_draft_model(mut self) -> Self {
         self.draft = env::var("EMBER_MODEL_DRAFT").ok().filter(|v| !v.is_empty()).unwrap_or_else(|| {
-            if self.base_url.contains("nebius.com") { "nvidia/Nemotron-3_5-Lightning".into() } else { self.coder.clone() }
+            if self.base_url.contains("nebius.com") {
+                "nvidia/Nemotron-3_5-Lightning".into()
+            } else {
+                self.coder.clone()
+            }
         });
         self
     }
@@ -139,7 +143,11 @@ fn price(model: &str) -> Option<(f64, f64, f64)> {
 
 /// A dollar amount for the status bar and /usage: tenths of a cent while it's small.
 pub fn format_cost(usd: f64) -> String {
-    if usd < 1.0 { format!("${usd:.3}") } else { format!("${usd:.2}") }
+    if usd < 1.0 {
+        format!("${usd:.3}")
+    } else {
+        format!("${usd:.2}")
+    }
 }
 
 /// Context window size in tokens for a model id (from the Token Factory catalog; conservative default).

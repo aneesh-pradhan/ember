@@ -35,14 +35,25 @@ pub fn build(root: &Path) -> Option<String> {
 /// does. list_files still shows them.
 fn is_noise(file: &str) -> bool {
     const LOCKFILES: &[&str] = &[
-        "Cargo.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb", "poetry.lock", "uv.lock",
-        "Pipfile.lock", "Gemfile.lock", "composer.lock", "go.sum", "flake.lock", "mix.lock", "pubspec.lock",
+        "Cargo.lock",
+        "package-lock.json",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "bun.lockb",
+        "poetry.lock",
+        "uv.lock",
+        "Pipfile.lock",
+        "Gemfile.lock",
+        "composer.lock",
+        "go.sum",
+        "flake.lock",
+        "mix.lock",
+        "pubspec.lock",
     ];
     const EXTENSIONS: &[&str] = &[
-        "jsonl", "ndjson", "csv", "tsv", "parquet", "arrow", "feather", "pkl", "npy", "npz", "h5", "sqlite", "sqlite3",
-        "db", "log", "png", "jpg", "jpeg", "gif", "webp", "ico", "bmp", "pdf", "zip", "gz", "tgz", "bz2", "xz", "7z",
-        "jar", "wasm", "so", "dylib", "dll", "exe", "o", "a", "class", "pyc", "woff", "woff2", "ttf", "otf", "mp3",
-        "mp4", "mov", "wav",
+        "jsonl", "ndjson", "csv", "tsv", "parquet", "arrow", "feather", "pkl", "npy", "npz", "h5", "sqlite", "sqlite3", "db", "log", "png",
+        "jpg", "jpeg", "gif", "webp", "ico", "bmp", "pdf", "zip", "gz", "tgz", "bz2", "xz", "7z", "jar", "wasm", "so", "dylib", "dll",
+        "exe", "o", "a", "class", "pyc", "woff", "woff2", "ttf", "otf", "mp3", "mp4", "mov", "wav",
     ];
     let name = file.rsplit('/').next().unwrap_or(file);
     let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
@@ -143,12 +154,15 @@ mod tests {
 
     #[test]
     fn small_projects_list_files_with_definitions() {
-        let dir = project("small", &[
-            ("src/lib.rs", "pub fn parse() {}\nstruct Token;\n    fn nested() {}\npub(crate) enum Kind {}\nimpl Token {}\n"),
-            ("app/models.py", "import os\nclass Invoice:\n    def total(self): ...\ndef helper():\n    pass\nasync def fetch(): ...\n"),
-            ("web/ui.ts", "export function render() {}\nexport const go = async () => 1;\nconst x = 3;\nexport default class App {}\n"),
-            ("README.md", "# hi\n"),
-        ]);
+        let dir = project(
+            "small",
+            &[
+                ("src/lib.rs", "pub fn parse() {}\nstruct Token;\n    fn nested() {}\npub(crate) enum Kind {}\nimpl Token {}\n"),
+                ("app/models.py", "import os\nclass Invoice:\n    def total(self): ...\ndef helper():\n    pass\nasync def fetch(): ...\n"),
+                ("web/ui.ts", "export function render() {}\nexport const go = async () => 1;\nconst x = 3;\nexport default class App {}\n"),
+                ("README.md", "# hi\n"),
+            ],
+        );
         let map = build(&dir).unwrap();
         assert!(map.contains("src/lib.rs: parse, Token, Kind"), "{map}");
         assert!(map.contains("app/models.py: Invoice, helper, fetch"), "{map}");
@@ -159,13 +173,22 @@ mod tests {
 
     #[test]
     fn maps_c_cpp_and_java_definitions() {
-        let dir = project("cpp", &[
-            ("src/graph.cpp", "#include \"graph.h\"\nint Graph::shortest(int a, int b) {\n  return helper(a);\n}\n\
-                               static void helper(int x)\n{\n}\nint main(int argc, char** argv) {\n}\nvoid declared(int);\n"),
-            ("src/graph.h", "#pragma once\nclass Graph {\npublic:\n  int shortest(int a, int b);\n};\nstruct Edge;\n\
-                             template <typename T>\nstruct Heap {\n};\nenum class Kind { A };\n"),
-            ("App.java", "package x;\npublic final class App {\n  public static void main(String[] a) {}\n}\n"),
-        ]);
+        let dir = project(
+            "cpp",
+            &[
+                (
+                    "src/graph.cpp",
+                    "#include \"graph.h\"\nint Graph::shortest(int a, int b) {\n  return helper(a);\n}\n\
+                               static void helper(int x)\n{\n}\nint main(int argc, char** argv) {\n}\nvoid declared(int);\n",
+                ),
+                (
+                    "src/graph.h",
+                    "#pragma once\nclass Graph {\npublic:\n  int shortest(int a, int b);\n};\nstruct Edge;\n\
+                             template <typename T>\nstruct Heap {\n};\nenum class Kind { A };\n",
+                ),
+                ("App.java", "package x;\npublic final class App {\n  public static void main(String[] a) {}\n}\n"),
+            ],
+        );
         let map = build(&dir).unwrap();
         assert!(map.contains("src/graph.cpp: Graph::shortest, helper, main"), "{map}");
         assert!(map.contains("src/graph.h: Graph, Heap, Kind"), "{map}");
@@ -175,13 +198,16 @@ mod tests {
 
     #[test]
     fn skips_lockfiles_and_data_files() {
-        let dir = project("noise", &[
-            ("src/main.rs", "fn main() {}\n"),
-            ("Cargo.lock", "# lock\n"),
-            ("bench/results/run.jsonl", "{}\n"),
-            ("docs/logo.png", "png"),
-            ("web/app.min.js", "x"),
-        ]);
+        let dir = project(
+            "noise",
+            &[
+                ("src/main.rs", "fn main() {}\n"),
+                ("Cargo.lock", "# lock\n"),
+                ("bench/results/run.jsonl", "{}\n"),
+                ("docs/logo.png", "png"),
+                ("web/app.min.js", "x"),
+            ],
+        );
         let map = build(&dir).unwrap();
         assert_eq!(map, "src/main.rs: main");
         std::fs::remove_dir_all(dir).unwrap();
